@@ -17,6 +17,16 @@ A modern Minecraft launcher built with **Tauri v2 + Vue 3 + Rust**, featuring an
 
 ---
 
+> [!WARNING]
+> **⚠️ 测试阶段 / Alpha Stage**
+>
+> 本项目目前仍处于早期测试阶段，绝大多数功能可能无法正常使用或存在严重 Bug。
+> 请勿将其用于日常游戏，生产环境建议使用 [HMCL](https://github.com/HMCL-dev/HMCL)、[PCL2](https://github.com/Hex-Dragon/PCL2) 或 [PrismLauncher](https://github.com/PrismLauncher/PrismLauncher) 等成熟启动器。
+>
+> This project is in early alpha. Most features may be broken or missing. Do NOT use it as your daily driver — use established launchers like HMCL, PCL2, or PrismLauncher instead.
+
+---
+
 ## 功能特性 / Features
 
 - 🎮 **原版安装** — 支持 Mojang 官方源和 BMCLAPI 镜像，一键安装任意版本
