@@ -1,0 +1,21 @@
+[package]
+name = "mcpatch-core"
+version = "0.1.0"
+edition.workspace = true
+description = "McPatch 增量更新核心库——从 McPatch2 客户端提取"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+crc = "3.0"
+base64 = "0.22"
+bytes = "1.6"
+chrono = { version = "0.4", features = ["clock"] }
+yaml-rust = "0.4"
+reqwest_dav = "0.1"
+async-trait = "0.1"
+once_cell = "1.19"
+json = "0.12"
