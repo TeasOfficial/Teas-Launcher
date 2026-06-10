@@ -13,7 +13,7 @@ const dlCount = computed(() => dlTasks.value.length);
 const navItems = [
   { id: "dashboard", zh: "仪表盘", en: "DASHBOARD" },
   { id: "instances", zh: "实例列表", en: "INSTANCES" },
-  { id: "dlTasks", zh: "下载任务", en: "DOWNLOADS", badge: dlCount },
+  { id: "dlTasks", zh: "任务列表", en: "TASKS", badge: dlCount },
   { id: "downloads", zh: "获取内容", en: "BROWSE" },
   { id: "accounts", zh: "账户管理", en: "ACCOUNTS" },
   { id: "settings", zh: "设置", en: "SETTINGS" },

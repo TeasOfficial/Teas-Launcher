@@ -194,7 +194,7 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
 <template>
   <section class="page active">
     <div class="page-header">
-      <h2 class="page-title"><span class="bl-zh">下载任务</span><span class="bl-en">DOWNLOADS</span></h2>
+      <h2 class="page-title"><span class="bl-zh">任务列表</span><span class="bl-en">TASKS</span></h2>
       <span class="page-line"></span>
       <button v-if="dlHistory.length > 0" class="acct-new-btn" @click="clearHistory" style="color:var(--danger);border-color:var(--danger)"><span>清空历史</span></button>
     </div>
@@ -289,8 +289,8 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
     </div>
 
     <div v-if="dlTasks.length === 0 && dlHistory.length === 0" class="dl-results-empty">
-      <span class="bl-zh">暂无下载任务</span>
-      <span class="bl-en">No download tasks</span>
+      <span class="bl-zh">暂无任务</span>
+      <span class="bl-en">No tasks</span>
     </div>
   </section>
 </template>

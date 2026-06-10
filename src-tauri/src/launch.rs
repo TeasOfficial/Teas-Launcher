@@ -138,10 +138,11 @@ impl LaunchContext {
         let cfg = crate::config::config_read("user".to_string())
             .unwrap_or(serde_json::json!({}));
 
+        // 前端使用 game_source key，值为 "官方源" 或 "BMCLAPI"
         let prefer_official = cfg
-            .get("download_source")
+            .get("game_source")
             .and_then(|v| v.as_str())
-            .map(|s| s == "Mojang")
+            .map(|s| s == "官方源")
             .unwrap_or(false);
 
         let gc_mode = match cfg.get("gc_mode").and_then(|v| v.as_str()).unwrap_or("auto") {
@@ -1078,9 +1079,11 @@ fn build_flat_args(
     // PHASE 5: 游戏参数
     // ═══════════════════════════════════════════════════════
     let mut game_args: Vec<String> = Vec::new();
+    let mut has_version_json_game_args = false;
 
     if let Some(mc_args_str) = version["minecraftArguments"].as_str() {
         if !mc_args_str.is_empty() {
+            has_version_json_game_args = true;
             let resolved_game = resolve(mc_args_str);
             game_args.extend(split_args_keep_quoting(&resolved_game));
             game_args.push("--height".to_string());
@@ -1091,6 +1094,9 @@ fn build_flat_args(
     }
 
     if let Some(game_list) = version["arguments"]["game"].as_array() {
+        if !game_list.is_empty() {
+            has_version_json_game_args = true;
+        }
         for arg in game_list {
             if let Some(s) = arg.as_str() {
                 if s.contains("${quickPlay") || s.contains("${QuickPlay") { continue; }
@@ -1110,6 +1116,33 @@ fn build_flat_args(
                 }
             }
         }
+    }
+
+    // ★ 当版本 JSON 没有提供游戏参数时（如某些 Fabric 整合包），添加必要的默认参数
+    if !has_version_json_game_args {
+        let asset_index = version["assets"].as_str().unwrap_or("legacy");
+        let version_type = version["type"].as_str().unwrap_or("release");
+        let version_id = version["id"].as_str().unwrap_or(&ctx.instance_name);
+        game_args.push("--username".to_string());
+        game_args.push(ctx.player_name.clone());
+        game_args.push("--version".to_string());
+        game_args.push(version_id.to_string());
+        game_args.push("--gameDir".to_string());
+        game_args.push(resolve("${game_directory}"));
+        game_args.push("--assetsDir".to_string());
+        game_args.push(resolve("${assets_root}"));
+        game_args.push("--assetIndex".to_string());
+        game_args.push(asset_index.to_string());
+        game_args.push("--uuid".to_string());
+        game_args.push(resolve("${auth_uuid}"));
+        game_args.push("--accessToken".to_string());
+        game_args.push(resolve("${auth_access_token}"));
+        game_args.push("--versionType".to_string());
+        game_args.push(version_type.to_string());
+        game_args.push("--width".to_string());
+        game_args.push(ctx.window_width.to_string());
+        game_args.push("--height".to_string());
+        game_args.push(ctx.window_height.to_string());
     }
 
     // OptiFineForgeTweaker 移到末尾
@@ -1175,16 +1208,10 @@ fn build_placeholders(
     map.push(("${assets_index_name}".into(), asset_index.to_string()));
     map.push(("${assets_root}".into(), assets_dir.display().to_string()));
     map.push(("${game_assets}".into(), assets_dir.display().to_string()));
-    // ★ PCL: game_directory 指向版本目录 (而非 .minecraft)
-    // PCL Log: gameDir=D:\Minecraft\[000A]\.minecraft\versions\26.2-snapshot-4
+    // game_directory 指向版本目录（版本隔离）
     let game_dir_for_mc = ctx.dot_minecraft
         .join("versions").join(&ctx.instance_name);
-    let resolved_game_dir = if game_dir_for_mc.exists() {
-        game_dir_for_mc
-    } else {
-        ctx.dot_minecraft.clone()
-    };
-    map.push(("${game_directory}".into(), resolved_game_dir.display().to_string()));
+    map.push(("${game_directory}".into(), game_dir_for_mc.display().to_string()));
     map.push(("${resolution_width}".into(), ctx.window_width.to_string()));
     map.push(("${resolution_height}".into(), ctx.window_height.to_string()));
     map.push(("${library_directory}".into(), libs_dir.display().to_string()));
@@ -1457,15 +1484,11 @@ fn spawn_process(
     let program = &flat_args[0];
     let args: &[String] = &flat_args[1..];
 
-    // ★ PCL: 工作目录 = 版本目录 (versions/<name>/)
+    // 工作目录 = 版本目录（版本隔离）
     let version_dir = ctx.dot_minecraft
         .join("versions").join(&ctx.instance_name);
     let version_dir_str = version_dir.display().to_string();
-    let working_dir = if version_dir.exists() {
-        version_dir
-    } else {
-        ctx.dot_minecraft.clone()
-    };
+    let working_dir = version_dir;
 
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
