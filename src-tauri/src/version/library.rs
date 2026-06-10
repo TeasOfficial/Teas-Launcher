@@ -214,16 +214,24 @@ pub fn mclib_list_from_json(
 
         let name_key = format!("{}:{}", parts[0], parts[1]); // group:artifact
 
+        // ★ 判断 classifier: 第4部分 (如 natives-windows, natives-windows-x86)
+        let has_classifier = parts.len() >= 4;
+        let classifier = if has_classifier { parts[3] } else { "" };
+
         // 根节点 URL — 参照 PCL-CE: rootUrl + McLibGet(name, False)
         // McLibGet with withHead=False 返回不含 libraries/ 前缀的 Maven 路径
         let root_url = lib.get("url").and_then(|v| v.as_str()).map(|u| {
+            let jar_name = if has_classifier {
+                format!("{}-{}-{}.jar", parts[1], parts[2], classifier)
+            } else {
+                format!("{}-{}.jar", parts[1], parts[2])
+            };
             let maven_rel = format!(
-                "{}/{}/{}/{}-{}.jar",
+                "{}/{}/{}/{}",
                 parts[0].replace('.', "/"),
                 parts[1],
                 parts[2],
-                parts[1],
-                parts[2]
+                jar_name
             );
             format!("{}/{}", u.trim_end_matches('/'), maven_rel.trim_start_matches('/'))
         });
@@ -239,7 +247,12 @@ pub fn mclib_list_from_json(
         // Natives vs non-natives
         if lib.get("natives").is_none() {
             // 没有 Natives — 普通库
-            let local_path = mclib_get(name, mc_dir);
+            // ★ 有 classifier 的名称使用 mclib_get_with_classifier 获取正确路径
+            let local_path = if has_classifier {
+                mclib_get_with_classifier(name, classifier, mc_dir)
+            } else {
+                mclib_get(name, mc_dir)
+            };
             let (url, sha1, size) = lib
                 .get("downloads")
                 .and_then(|d| d.get("artifact"))
@@ -317,12 +330,15 @@ pub fn mclib_list_from_json(
         }
     }
 
-    // 去重 — 参照 PCL-CE: 同名+同is_natives → 保留高版本
+    // 去重 — 参照 PCL-CE: 用完整 original_name 做键（含 classifier）
+    // ★ BUILD=72 修复: 之前用 name+is_natives 做键，导致不同 classifier 被错误合并
+    // 如 lwjgl-glfw:3.4.1:natives-windows 和 lwjgl-glfw:3.4.1:natives-windows-x86 被当成同一个
     let mut deduped: Vec<McLibToken> = Vec::new();
     for token in result {
-        let key = format!("{}{}", token.name, token.is_natives);
+        // ★ 键 = original_name（含 classifier，如 :natives-windows-x86）
+        let key = token.original_name.clone();
         if let Some(existing) = deduped.iter().position(|t| {
-            format!("{}{}", t.name, t.is_natives) == key
+            t.original_name == key
         }) {
             // 同名库，保留高版本
             let existing_ver = extract_version(&deduped[existing].local_path);

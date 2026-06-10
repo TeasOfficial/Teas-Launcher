@@ -28,7 +28,7 @@ mod modrinth;
 mod curseforge;
 mod modpack;
 
-pub(crate) const BUILD: u32 = 64;
+pub(crate) const BUILD: u32 = 72;
 
 pub fn run() {
     let mut sys = sysinfo::System::new_all();

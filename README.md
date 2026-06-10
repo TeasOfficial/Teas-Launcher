@@ -27,6 +27,24 @@ A modern Minecraft launcher built with **Tauri v2 + Vue 3 + Rust**, featuring an
 
 ---
 
+## TODO
+
+> 以下为当前已知的待办事项，按优先级排列。
+
+- [ ] **Microsoft 正版登录** — 目前仅支持离线模式
+- [ ] **Authlib-Injector 外置登录** — 第三方验证服支持
+- [ ] **CurseForge 整合包安装** — 目前仅支持 Modrinth (.mrpack) 格式
+- [ ] **原版游戏下载** — 下载中心入口尚未接入安装流程
+- [ ] **整合包安装后自动补全** — Forge/Fabric/NeoForge 加载器的版本 JSON / Libraries 自动下载
+- [ ] **非 ASCII 路径兼容** — Windows GBK 编码下路径含中文时的 JLW 支持
+- [ ] **启动后窗口隐藏** — 游戏启动后自动隐藏/恢复启动器窗口
+- [ ] **多语言支持** — 目前仅支持中文
+- [ ] **自动更新** — 启动器自身更新机制
+- [ ] **Linux / macOS 支持** — 目前仅支持 Windows x64
+- [ ] **测试覆盖** — 缺乏自动化测试
+
+---
+
 ## 功能特性 / Features
 
 - 🎮 **原版安装** — 支持 Mojang 官方源和 BMCLAPI 镜像，一键安装任意版本

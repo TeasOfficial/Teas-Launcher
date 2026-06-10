@@ -111,11 +111,11 @@ mcstarter/
 - `resolve_version(dm, name)` — 递归解析 inheritsFrom 合并父版本数据
 - `sync_instance_files(app, dm, name, source, label)` — 核心同步逻辑
 
-### 启动 — `launch.rs` (2026-06-09 重写, BUILD=64)
+### 启动 — `launch.rs` (2026-06-10 完全重写, BUILD=65)
 
-参照 HMCL/PCL/PCL-CE/PrismLauncher 四大启动器完全重写:
+参照 HMCL/PCL/PCL-CE/PrismLauncher 四大启动器完全重写。核心架构变更：
 
-**架构**: `LaunchContext` → `pre_check` → `ensure_parent_version` → 补全 Libraries+Assets → `prepare_natives` (PCL-style 清空+重解压) → `build_arguments` (HMCL/PCL-style 完整参数链) → `pre_run_setup` (log4j2.xml + options.txt) → `spawn_process` (直接 ProcessBuilder, 不用 bat) → `monitor_process` (流监控 + 崩溃检测)
+**架构**: `LaunchContext` → `pre_check` → `ensure_parent_version` → 补全 Libraries+Assets → `prepare_natives` (PCL-style 清空+重解压+非ASCII回退) → **`build_flat_args` → `Vec<String>`** (HMCL-style，永不拼接字符串再分割) → `pre_run_setup` (log4j2.xml + options.txt) → `spawn_process` (ProcessBuilder 直接使用 Vec<String>) → `monitor_process` (HMCL-style stream pumps + ExitWaiter)
 
 **命令**:
 - `launch_instance(...)` — 完整启动流程
@@ -123,14 +123,19 @@ mcstarter/
 - `is_instance_running()` — 检查 RUNNING_PID
 - `get_launch_args(...)` — 调试用参数预览
 
-**关键改进** (vs 旧版):
-1. 直接 ProcessBuilder 启动 (不用 BAT), `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`
-2. 完整 classpath 构建 (PCL-style 排序, OptiFine 倒数第二)
-3. JVM 参数: 编码/GC(G1GC+ZGC)/Log4j RCE防御/Java版本适配
-4. Natives: 清空→重解压→删除孤立文件 (PCL-style)
-5. 预启动: log4j2.xml提取、options.txt语言修复
-6. 进程监控: stdout/stderr pump threads + ExitWaiter + 崩溃检测集成
-7. 环境变量: APPDATA, Path(含Java bin), INST_*
+**关键改进 (BUILD=65)**:
+1. **参数不再拼接后分割** — `build_flat_args` 返回 `Vec<String>`，直接传给 `Command::args(&vec)`，彻底消除引号丢失 bug
+2. Classpath: OptiFine 插入到 `len-1` 位置（倒数第二），主 JAR 最后
+3. JVM 参数优先级 (HMCL-style): 用户覆盖→内存→Metaspace→编码→GC→安全→版本JSON→classpath→Main class→游戏参数
+4. Natives: PCL-style 非ASCII路径回退 (%APPDATA%\.minecraft\bin\natives\ → ProgramData)
+5. Java 版本检测: 回退到 `-version` 解析（比 `-XshowSettings:all` 更可靠）
+6. 参数去重: PCL-style（JVM去重同key, 游戏参数覆盖同key，除 --tweakClass）
+7. 正确设置 APPDATA 环境变量（指向 .minecraft 目录本身，而非父目录）
+8. 旧版 Minecraft 兼容: 处理 minecraftArguments 字符串格式
+9. OptiFineForgeTweaker 移到游戏参数末尾（PCL-style）
+10. `-XX:MaxDirectMemorySize=256M` 清理（PCL #3511）
+11. `-XX:+PerfDisableSharedMem`（release only，减少 overhead）
+12. GC 策略: 可配置(G1GC/ZGC/自定义)，默认 Java 21+ ZGC、15-20 ZGC、8-14 G1GC
 
 ### 崩溃检测 — `crash.rs`
 - `check_crash(mc_dir, instance_name)` — 检查 stderr.log / crash-reports / latest.log
