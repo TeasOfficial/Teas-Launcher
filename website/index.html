@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teas Launcher — 工业科幻 Minecraft 启动器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg-deep: #0A0A0A; --bg-mid: #121212; --bg-panel: #161618;
+      --bg-raised: #1C1C1E; --border: #252528; --border-lit: #333338;
+      --accent: #C8FF3D; --accent-dim: rgba(200,255,61,.12);
+      --secondary: #FFFFFF; --text: #D0D0D4; --text-dim: #6A6A72;
+      --warn: #FF8A3D; --danger: #FF4D4D;
+      --font-tech: 'Orbitron', sans-serif; --font-mono: 'JetBrains Mono', monospace; --font-sans: 'Inter', sans-serif;
+    }
+    body { font-family: var(--font-sans); background: var(--bg-deep); color: var(--text); line-height: 1.6; overflow-x: hidden; }
+    a { color: var(--accent); text-decoration: none; }
+    /* ── Nav ── */
+    nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: rgba(10,10,10,.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .nav-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 14px 32px; }
+    .nav-logo { display: flex; align-items: center; gap: 10px; }
+    .nav-logo svg { width: 28px; height: 28px; }
+    .nav-logo .t { font-family: var(--font-tech); font-size: 20px; font-weight: 900; color: var(--secondary); letter-spacing: 2px; }
+    .nav-links { display: flex; gap: 28px; font-size: 13px; font-weight: 500; }
+    .nav-links a { color: var(--text-dim); transition: color .15s; }
+    .nav-links a:hover { color: var(--accent); }
+    .nav-cta { padding: 8px 20px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-weight: 600; font-size: 13px; transition: all .15s; }
+    .nav-cta:hover { background: var(--accent-dim); }
+    /* ── Hero ── */
+    .hero { padding: 160px 32px 100px; text-align: center; position: relative; overflow: hidden; }
+    .hero::before { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 0%, rgba(200,255,61,.06) 0%, transparent 60%); pointer-events: none; }
+    .hero h1 { font-family: var(--font-tech); font-size: 56px; font-weight: 900; letter-spacing: 4px; color: var(--secondary); position: relative; }
+    .hero h1 span { color: var(--accent); }
+    .hero .sub { font-size: 18px; color: var(--text-dim); margin-top: 12px; font-weight: 400; }
+    .hero .sub-en { font-size: 13px; color: var(--text-dim); opacity: .6; margin-top: 4px; }
+    .hero-btns { display: flex; gap: 16px; justify-content: center; margin-top: 36px; flex-wrap: wrap; position: relative; z-index: 1; }
+    .btn { padding: 14px 36px; font-family: var(--font-tech); font-size: 14px; font-weight: 700; letter-spacing: 1px; border: none; border-radius: 4px; cursor: pointer; transition: all .2s; text-transform: uppercase; }
+    .btn-primary { background: var(--accent); color: var(--bg-deep); }
+    .btn-primary:hover { box-shadow: 0 0 24px rgba(200,255,61,.3); transform: translateY(-1px); }
+    .btn-outline { background: transparent; border: 1px solid var(--border-lit); color: var(--secondary); }
+    .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+    .hero-ver { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); margin-top: 20px; opacity: .5; }
+    .alpha-warn { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 24px; padding: 10px 24px; border: 1px solid var(--warn); border-radius: 6px; background: rgba(255,138,61,.06); font-size: 13px; color: var(--warn); max-width: 560px; }
+    .alpha-dot { width: 8px; height: 8px; background: var(--warn); border-radius: 50%; display: inline-block; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+    /* ── Features ── */
+    .section { max-width: 1100px; margin: 0 auto; padding: 80px 32px; }
+    .section-title { text-align: center; margin-bottom: 48px; }
+    .section-title h2 { font-family: var(--font-tech); font-size: 28px; font-weight: 700; letter-spacing: 2px; color: var(--secondary); }
+    .section-title .en { font-size: 11px; color: var(--text-dim); letter-spacing: 2px; margin-top: 4px; }
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+    .feat-card { background: var(--bg-panel); border: 1px solid var(--border); padding: 28px; border-radius: 6px; transition: border-color .2s; position: relative; overflow: hidden; }
+    .feat-card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--accent); opacity: 0; transition: opacity .2s; }
+    .feat-card:hover { border-color: var(--border-lit); }
+    .feat-card:hover::before { opacity: 1; }
+    .feat-icon { font-size: 28px; margin-bottom: 12px; }
+    .feat-card h3 { font-size: 16px; font-weight: 600; color: var(--secondary); margin-bottom: 8px; }
+    .feat-card p { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+    .feat-card .en { font-size: 10px; color: var(--text-dim); opacity: .5; margin-top: 4px; display: block; }
+    /* ── Tech ── */
+    .tech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .tech-item { background: var(--bg-mid); border: 1px solid var(--border); padding: 20px; border-radius: 4px; }
+    .tech-label { font-family: var(--font-tech); font-size: 13px; font-weight: 600; color: var(--accent); letter-spacing: 1px; }
+    .tech-detail { font-size: 12px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+    /* ── Ref ── */
+    .ref-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .ref-card { background: var(--bg-panel); border: 1px solid var(--border); padding: 20px; border-radius: 6px; text-align: center; transition: border-color .2s; }
+    .ref-card:hover { border-color: var(--accent); }
+    .ref-card img { width: 48px; height: 48px; margin-bottom: 10px; border-radius: 8px; }
+    .ref-name { font-size: 15px; font-weight: 600; color: var(--secondary); }
+    .ref-sub { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; }
+    .ref-desc { font-size: 11px; color: var(--text-dim); opacity: .7; }
+    /* ── Footer ── */
+    footer { border-top: 1px solid var(--border); padding: 32px; text-align: center; font-size: 11px; color: var(--text-dim); }
+    footer .ver { font-family: var(--font-mono); }
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg-deep); } ::-webkit-scrollbar-thumb { background: var(--border-lit); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <div class="nav-logo">
+        <svg viewBox="0 0 24 24"><path d="M12 2L3 7v10l9 5 9-5V7L12 2z" fill="none" stroke="var(--accent)" stroke-width="1.5"/></svg>
+        <span class="t">TEAS</span>
+      </div>
+      <div class="nav-links">
+        <a href="#features">功能 / Features</a>
+        <a href="#tech">技术 / Tech</a>
+        <a href="#credits">鸣谢 / Credits</a>
+        <a href="https://github.com/TeasOfficial/Teas-Launcher" target="_blank">GitHub</a>
+      </div>
+      <a href="#download" class="nav-cta">下载 / DOWNLOAD</a>
+    </div>
+  </nav>
+
+  <section class="hero" id="home">
+    <h1>TEAS <span>LAUNCHER</span></h1>
+    <p class="sub">工业科幻仪表盘风格 Minecraft 启动器</p>
+    <p class="sub-en">Industrial Sci-Fi Dashboard Minecraft Launcher</p>
+    <div class="alpha-warn">
+      <span class="alpha-dot"></span>
+      <span>Alpha 预览版 — 仅供测试，多数功能未完善，存在已知 Bug，请勿用于日常游戏</span>
+      <span style="font-size:10px;opacity:.5;display:block;margin-top:2px">Alpha Preview — For testing only. Most features are incomplete. Do NOT use as daily driver.</span>
+    </div>
+    <div class="hero-btns">
+      <a href="#download" class="btn btn-primary">立即下载</a>
+      <a href="https://github.com/TeasOfficial/Teas-Launcher" target="_blank" class="btn btn-outline">GitHub</a>
+    </div>
+    <p class="hero-ver">BUILD 75 · v0.1.1 · Windows x64</p>
+  </section>
+
+  <section class="section" id="features">
+    <div class="section-title">
+      <h2>功能特性</h2>
+      <p class="en">FEATURES</p>
+    </div>
+    <div class="features">
+      <div class="feat-card">
+        <div class="feat-icon">🚀</div>
+        <h3>启动引擎 / Launch Engine</h3>
+        <p>参照 HMCL · PCL · PrismLauncher 设计，Vec&lt;String&gt; 直传避免引号丢失，LWJGL 3.4.1 + Java 25 兼容</p>
+        <span class="en">Based on HMCL / PCL / PrismLauncher</span>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">📦</div>
+        <h3>多源智能下载 / Multi-Source Download</h3>
+        <p>Modrinth + CurseForge 搜索安装，多线程并行 + 镜像自动回退，SHA1 + 大小双重校验</p>
+        <span class="en">Modrinth / CurseForge with mirror fallback</span>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">⚙️</div>
+        <h3>加载器安装 / Loader Install</h3>
+        <p>Forge · Fabric · NeoForge · Quilt · Cleanroom 一键安装，原版文件自动同步</p>
+        <span class="en">Forge / Fabric / NeoForge / Quilt / Cleanroom</span>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">🧠</div>
+        <h3>智能内存分配 / Auto Memory</h3>
+        <p>HMCL + PCL 算法，根据 Mod 数量 × 可用内存自动计算，滑块 + 输入框 + 自动模式</p>
+        <span class="en">HMCL+PCL auto-allocation algorithm</span>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">🩺</div>
+        <h3>崩溃检测 / Crash Analyzer</h3>
+        <p>自动分析 stderr · crash-reports · latest.log，8 种模式匹配定位原因</p>
+        <span class="en">Auto crash analysis with pattern matching</span>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">📁</div>
+        <h3>版本隔离 / Version Isolation</h3>
+        <p>默认开启版本隔离，拖放安装整合包 (.mrpack / .zip)，自动定位 mods 文件夹</p>
+        <span class="en">Version isolation + drag-drop modpack install</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="tech">
+    <div class="section-title">
+      <h2>技术栈</h2>
+      <p class="en">TECH STACK</p>
+    </div>
+    <div class="tech-grid">
+      <div class="tech-item">
+        <span class="tech-label">Rust + Tauri v2</span>
+        <p class="tech-detail">系统级原生桌面壳<br/>轻量二进制（~5MB）<br/>安全内存管理，无 GC 停顿</p>
+      </div>
+      <div class="tech-item">
+        <span class="tech-label">Vue 3 + TypeScript</span>
+        <p class="tech-detail">Composition API 响应式架构<br/>Vite 秒级热更新<br/>完整类型推导与检查</p>
+      </div>
+      <div class="tech-item">
+        <span class="tech-label">工业科幻设计</span>
+        <p class="tech-detail">暗色仪表盘主题<br/>双语 UI 系统 (中 / 英)<br/>Orbitron + JetBrains Mono 字体</p>
+      </div>
+      <div class="tech-item">
+        <span class="tech-label">reqwest + rustls</span>
+        <p class="tech-detail">纯 Rust TLS（无需 OpenSSL）<br/>brotli / gzip 自动解码<br/>代理 + 镜像源智能回退</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="credits">
+    <div class="section-title">
+      <h2>鸣谢</h2>
+      <p class="en">CREDITS</p>
+    </div>
+    <div class="ref-cards">
+      <a href="https://github.com/HMCL-dev/HMCL" target="_blank" class="ref-card">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23333'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='white' font-size='12' font-weight='bold'%3EH%3C/text%3E%3C/svg%3E" alt="">
+        <div class="ref-name">HMCL</div>
+        <div class="ref-sub">Hello Minecraft! Launcher</div>
+        <p class="ref-desc">功能全面的跨平台启动器</p>
+      </a>
+      <a href="https://github.com/Meloong-Git/PCL" target="_blank" class="ref-card">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23222'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%23C8FF3D' font-size='10' font-weight='bold'%3EPCL%3C/text%3E%3C/svg%3E" alt="">
+        <div class="ref-name">PCL</div>
+        <div class="ref-sub">Plain Craft Launcher</div>
+        <p class="ref-desc">龙腾猫跃开发的经典启动器</p>
+      </a>
+      <a href="https://github.com/PCL-Community/PCL2" target="_blank" class="ref-card">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231a1a2e'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%234fc3f7' font-size='8' font-weight='bold'%3ECE%3C/text%3E%3C/svg%3E" alt="">
+        <div class="ref-name">PCL 社区版</div>
+        <div class="ref-sub">Plain Craft Launcher CE</div>
+        <p class="ref-desc">社区驱动的开源分支</p>
+      </a>
+      <a href="https://github.com/PrismLauncher/PrismLauncher" target="_blank" class="ref-card">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231b1b2f'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%23e04be0' font-size='8' font-weight='bold'%3EPR%3C/text%3E%3C/svg%3E" alt="">
+        <div class="ref-name">PrismLauncher</div>
+        <div class="ref-sub">MultiMC 精神续作</div>
+        <p class="ref-desc">国外最受欢迎的第三方启动器</p>
+      </a>
+    </div>
+  </section>
+
+  <section class="section" id="download" style="text-align:center">
+    <div class="section-title">
+      <h2>下载</h2>
+      <p class="en">DOWNLOAD</p>
+    </div>
+    <p style="color:var(--text-dim);margin-bottom:24px">当前版本: BUILD 75 · v0.1.1 · Windows x64</p>
+    <div class="hero-btns">
+      <a href="https://github.com/TeasOfficial/Teas-Launcher/releases" target="_blank" class="btn btn-primary">GitHub Releases</a>
+    </div>
+    <p style="font-size:12px;color:var(--warn);margin-top:20px">⚠️ 当前为早期 Alpha 测试版，仅供体验预览，不保证功能完整性与稳定性</p>
+    <p style="font-size:10px;color:var(--text-dim);margin-top:8px;opacity:.5">需要 Rust 1.80+ · Node.js 18+ · Windows 10+</p>
+  </section>
+
+  <footer>
+    <p>Teas Launcher &copy; 2026 · Built with Rust + Tauri v2 + Vue 3</p>
+    <p class="ver" style="margin-top:4px">BUILD 75 · v0.1.1</p>
+    <p style="margin-top:16px;font-size:10px;color:var(--text-dim);opacity:.5">
+      <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:var(--text-dim)">辽ICP备2023013547号</a>
+      &nbsp;·&nbsp;
+      <a href="http://www.beian.gov.cn/portal/registerSystemInfo?recordcode=21052202000156" target="_blank" rel="noopener" style="color:var(--text-dim)">辽公网安备 21052202000156号</a>
+    </p>
+  </footer>
+</body>
+</html>

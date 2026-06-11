@@ -525,7 +525,7 @@ pub async fn download_files_parallel(
 async fn download_single_with_batch(
     app: &tauri::AppHandle,
     file: &mut DownloadFile,
-    enable_parallel_chunks: bool,
+    _enable_parallel_chunks: bool,
     batch: &BatchProgress,
     display_name: &str,
 ) -> Result<u64, String> {

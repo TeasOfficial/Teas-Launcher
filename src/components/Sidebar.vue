@@ -22,23 +22,28 @@ const navItems = [
 const netLevel = ref<"ok" | "warn" | "err">("ok");
 const netZh = ref("系统正常");
 const netEn = ref("SYS OK");
-const netDetail = ref("");
+const netServices = ref<{name: string; ok: boolean}[]>([]);
+const showNetDetail = ref(false);
 let netTimer: number;
 
 async function checkNet() {
   try {
     const result = await invoke<{ ok: number; total: number; failures: string[] }>("check_network");
+    const allServices = ["Minecraft","Modrinth","CurseForge"] as const;
+    netServices.value = allServices.map(s => ({
+      name: s,
+      ok: !result.failures.some((f: string) => f.toLowerCase().includes(s.toLowerCase()))
+    }));
     if (result.failures.length === 0) {
-      netLevel.value = "ok"; netZh.value = "系统正常"; netEn.value = "SYS OK"; netDetail.value = "";
+      netLevel.value = "ok"; netZh.value = "系统正常"; netEn.value = "SYS OK";
     } else if (result.ok === 0) {
       netLevel.value = "err"; netZh.value = "无网络连接"; netEn.value = "NO NETWORK";
-      netDetail.value = result.failures.join(" / ");
     } else {
       netLevel.value = "warn"; netZh.value = "部分服务异常"; netEn.value = "PARTIAL OUTAGE";
-      netDetail.value = result.failures.join(" / ");
     }
   } catch {
     netLevel.value = "err"; netZh.value = "检测失败"; netEn.value = "CHECK FAILED";
+    netServices.value = [];
   }
 }
 
@@ -84,16 +89,38 @@ onUnmounted(() => clearInterval(netTimer));
     </div>
 
     <div class="sidebar-footer" data-tauri-drag-region>
-      <div class="sys-status" :class="netLevel">
+      <div class="sys-status" :class="netLevel" @click="showNetDetail = !showNetDetail" title="点击查看网络详情">
         <span class="sys-dot" :class="netLevel"></span>
-        <div class="sys-info">
-          <span class="sys-label">
-            <span class="bl-zh">{{ netZh }}</span>
-            <span class="bl-en">{{ netEn }}</span>
-          </span>
-          <span class="sys-detail" v-if="netDetail">{{ netDetail }}</span>
-        </div>
+        <span class="sys-short">
+          <span class="bl-zh">{{ netZh }}</span>
+          <span class="bl-en">{{ netEn }}</span>
+        </span>
+        <span class="sys-more">▸</span>
       </div>
+      <!-- 网络详情弹出层 -->
+      <Transition name="modal">
+        <div v-if="showNetDetail" class="net-detail-popup" @click.stop>
+          <div class="net-detail-header">
+            <span class="bl-zh">网络状态</span>
+            <span class="bl-en">NETWORK</span>
+            <button class="net-detail-close" @click="showNetDetail = false">✕</button>
+          </div>
+          <div class="net-detail-body">
+            <div class="net-detail-row">
+              <span class="sys-dot" :class="netLevel" style="margin-right:8px"></span>
+              <span class="bl-zh" style="font-weight:600">{{ netZh }}</span>
+              <span class="bl-en" style="color:var(--text-dim)">{{ netEn }}</span>
+            </div>
+            <div class="net-detail-services" v-if="netServices.length > 0">
+              <div class="net-detail-row" v-for="s in netServices" :key="s.name">
+                <span class="sys-dot" :class="s.ok ? 'ok' : 'err'" style="margin-right:8px"></span>
+                <span>{{ s.name }}</span>
+                <span style="margin-left:auto;color:var(--text-dim)">{{ s.ok ? '✓' : '✕' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </div>
   </nav>
 </template>

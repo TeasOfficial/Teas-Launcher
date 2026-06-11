@@ -241,56 +241,6 @@ pub(crate) fn offline_uuid(name: &str) -> String {
     )
 }
 
-/// 从 Libraries JAR 中提取 Native DLL 到版本目录
-pub(crate) fn extract_natives(
-    dm: &std::path::Path,
-    ver: &serde_json::Value,
-    name: &str,
-) -> Result<std::path::PathBuf, String> {
-    let vd = dm.join("versions").join(name);
-    let nd = vd.join(format!("{}-natives", name));
-    std::fs::create_dir_all(&nd).map_err(|e| e.to_string())?;
-    if nd.join("lwjgl_opengl.dll").exists() {
-        return Ok(nd);
-    }
-    let ld = dm.join("libraries");
-    if let Some(libs) = ver["libraries"].as_array() {
-        for lib in libs {
-            let n = lib["name"].as_str().unwrap_or("");
-            let parts: Vec<&str> = n.split(':').collect();
-            if parts.len() < 4 || !parts[3].contains("natives") {
-                continue;
-            }
-            let (g, a, v) = (parts[0], parts[1], parts[2]);
-            let jp = ld
-                .join(g.replace('.', "/"))
-                .join(a)
-                .join(v)
-                .join(format!("{}-{}-{}.jar", a, v, parts[3]));
-            if jp.exists() {
-                if let Ok(f) = std::fs::File::open(&jp) {
-                    if let Ok(mut archive) = zip::ZipArchive::new(f) {
-                        for i in 0..archive.len() {
-                            if let Ok(mut e) = archive.by_index(i) {
-                                let en = e.name().to_string();
-                                if en.ends_with(".dll") {
-                                    let dest = nd.join(std::path::Path::new(&en).file_name().unwrap());
-                                    if !dest.exists() {
-                                        let mut o =
-                                            std::fs::File::create(&dest).map_err(|e| e.to_string())?;
-                                        std::io::copy(&mut e, &mut o).map_err(|e| e.to_string())?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(nd)
-}
-
 /// 检查 JVM/game 参数是否匹配当前操作系统
 #[allow(dead_code)]
 pub(crate) fn arg_matches_current_os(obj: &serde_json::Value) -> bool {

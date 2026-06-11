@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const activeTab = ref("general");
+const buildVer = ref("");
 
 const tabs = [
   { id: "general", zh: "通用", en: "GENERAL" },
@@ -14,7 +15,12 @@ const tabs = [
   const cfg = ref<Record<string, any>>({});
 
 async function save(key: string, value: any) {
-  try { await invoke("config_write", { scope: "user", key, value }); } catch { /* */ }
+  try {
+    await invoke("config_write", { scope: "user", key, value });
+    console.log("[config] saved", key, "=", value);
+  } catch (e) {
+    console.error("[config] save failed:", key, e);
+  }
 }
 
 const windowPresets = [
@@ -26,24 +32,64 @@ const windowPresets = [
 const windowPreset = ref("854 × 480 (默认)");
 const presetOpen = ref(false);
 
-const memPresets = [
-  { label: "2 GB",  value: "2048 MB" },
-  { label: "4 GB",  value: "4096 MB" },
-  { label: "6 GB",  value: "6144 MB" },
-  { label: "8 GB",  value: "8192 MB" },
-  { label: "12 GB", value: "12288 MB" },
-  { label: "16 GB", value: "16384 MB" },
-  { label: "自定义", value: "", custom: true },
-];
-const memPreset = ref("4 GB");
-const memOpen = ref(false);
+// ── 内存滑块 (HMCL-style) ──
+const memSliderMin = 512;  // 512 MB
+const memSliderMax = ref(16384); // 默认 16GB，会在 onMounted 更新
+const memSliderStep = 256; // 256 MB 步长
+const memSliderVal = ref(4096); // 当前值 MB
+const memAuto = ref(true); // 默认开启自动分配
+const autoMemValue = ref("");
 
-function selectMemPreset(p: typeof memPresets[0]) {
-  memPreset.value = p.label;
-  memOpen.value = false;
-  if (!p.custom) { cfg.value.max_memory = p.value; save("max_memory", p.value); }
+function parseMemMB(s: string): number {
+  const m = s.match(/(\d+)/);
+  return m ? parseInt(m[1]) * (s.includes("G") ? 1024 : 1) : 4096;
 }
-function onCustomMem(e: any) { cfg.value.max_memory = e.target.value; save("max_memory", e.target.value); }
+function onMemSlider(e: any) {
+  memAuto.value = false;
+  const mb = parseInt(e.target.value) || 4096;
+  memSliderVal.value = mb;
+  const val = `${mb} MB`;
+  cfg.value.max_memory = val;
+  save("max_memory", val);
+}
+function onMemInput(e: any) {
+  memAuto.value = false;
+  const mb = parseInt(e.target.value) || 4096;
+  memSliderVal.value = Math.max(memSliderMin, Math.min(mb, memSliderMax.value));
+  const val = `${memSliderVal.value} MB`;
+  cfg.value.max_memory = val;
+  save("max_memory", val);
+}
+
+async function toggleAutoMem() {
+  if (memAuto.value && autoMemValue.value) {
+    // 已在自动模式 → 关闭
+    memAuto.value = false;
+    autoMemValue.value = "";
+    save("mem_auto", false);
+    return;
+  }
+  try {
+    const memInfo: any = await invoke("get_memory_info");
+    const totalMem = memInfo[0] || 8192;
+    const freeMem = memInfo[1] || 4096;
+    const instances = await invoke<any[]>("list_instances", { mcDir: await invoke("get_minecraft_dir") });
+    const activeInst = instances?.find((i: any) => i.active);
+    const autoMB = await invoke<number>("calc_auto_memory", {
+      totalMemMb: Math.round(totalMem),
+      availableMemMb: Math.round(freeMem),
+      is64bitJava: true,
+      modCount: activeInst?.mods || 0,
+      hasModLoader: activeInst?.loaderName && activeInst.loaderName !== "Vanilla",
+    });
+    memAuto.value = true;
+    memSliderVal.value = autoMB;
+    autoMemValue.value = `推荐 ${autoMB} MB (≈${(autoMB/1024).toFixed(1)} GB)`;
+    cfg.value.max_memory = `${autoMB} MB`;
+    save("mem_auto", true);
+    save("max_memory", `${autoMB} MB`);
+  } catch { autoMemValue.value = "计算失败"; memAuto.value = false; }
+}
 
 const generalSettings = [
   { key: "close_after",   labelZh: "启动后关闭启动器", labelEn: "Close After Launch", def: "否", toggle: true },
@@ -89,11 +135,30 @@ async function pickCustomJava() {
 }
 
 onMounted(async () => {
-  try { cfg.value = await invoke("config_read", { scope: "user" }); } catch { /* */ }
+  try {
+    buildVer.value = await invoke<string>("get_full_version");
+  cfg.value = await invoke("config_read", { scope: "user" });
+  console.log("[config] loaded", JSON.stringify(cfg.value).slice(0, 200));
+  } catch (e) {
+    console.error("[config] load failed:", e);
+  }
   const w = cfg.value.window_width || "854";
   const h = cfg.value.window_height || "480";
   const match = windowPresets.find(p => p.w === w && p.h === h);
-  windowPreset.value = match ? match.label : "自定义"; const memMatch = memPresets.find(p => p.value === (cfg.value.max_memory || "4096 MB")); memPreset.value = memMatch ? memMatch.label : (cfg.value.max_memory ? "自定义" : "4 GB");
+  windowPreset.value = match ? match.label : "自定义";
+  // 初始化内存滑块
+  const savedMem = cfg.value.max_memory || "4096 MB";
+  memSliderVal.value = parseMemMB(savedMem);
+  memAuto.value = cfg.value.mem_auto !== false; // 默认开启
+  if (memAuto.value) {
+    // 初次加载或auto模式：触发自动计算
+    toggleAutoMem().catch(() => {});
+  }
+  try {
+    const memInfo: any = await invoke("get_memory_info");
+    const total = memInfo[0] || 16384;
+    memSliderMax.value = Math.max(512, Math.floor(total * 0.75 / 256) * 256);
+  } catch { /* */ }
   javaVal.value = cfg.value.java_path || "javaw";
   // 恢复代理设置
   proxyType.value = cfg.value.proxy_type || "None";
@@ -102,12 +167,15 @@ onMounted(async () => {
   proxyUser.value = cfg.value.proxy_user || "";
   proxyPass.value = cfg.value.proxy_pass || "";
   scanStrategy.value = cfg.value.jar_scan_strategy || "B";
+  gameSource.value = cfg.value.game_source || "官方源";
+  modSource.value = cfg.value.mod_source || "MCIMirror";
+  dlThreads.value = cfg.value.dl_threads || "8";
   scanJava();
 });
 
 const gameSources = ["官方源", "BMCLAPI"];
 const modSources = ["官方源", "MCIMirror"];
-const gameSource = ref(cfg.value.game_source || "BMCLAPI");
+const gameSource = ref(cfg.value.game_source || "官方源");
 const modSource = ref(cfg.value.mod_source || "MCIMirror");
 
 function saveGameSource(v: string) { gameSource.value = v; save("game_source", v); }
@@ -294,24 +362,34 @@ function onCustomWH(which: string, e: any) {
       </div>
 
       <div class="settings-grid" v-else-if="activeTab === 'launch'" key="launch">
-        <!-- 内存分配 -->
+        <!-- 内存分配 (HMCL-style 滑块 + 输入框) -->
         <div class="set-item">
           <span class="set-label"><span class="bl-zh">游戏内存</span><span class="bl-en">Memory</span></span>
           <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-            <div class="custom-select" @click="memOpen = !memOpen" @blur="setTimeout(() => memOpen = false, 150)">
-              <span class="set-select-val">{{ memPreset }}</span>
-              <span class="set-select-arrow" :class="{ open: memOpen }">▾</span>
-              <Transition name="drop">
-                <div class="set-select-options" v-if="memOpen">
-                  <div class="set-select-opt" :class="{ active: p.label === memPreset }" v-for="p in memPresets" :key="p.label" @click.stop="selectMemPreset(p)">{{ p.label }}</div>
-                </div>
-              </Transition>
+            <!-- 滑块 + 输入框 + 单位 -->
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="range" class="mem-slider"
+                :min="memSliderMin" :max="memSliderMax" :step="memSliderStep"
+                :value="memSliderVal" :disabled="memAuto"
+                @input="onMemSlider($event)" />
+              <input class="set-input" style="width:68px;text-align:center;font-size:12px"
+                :value="memSliderVal" :disabled="memAuto"
+                @change="onMemInput($event)" />
+              <span style="font-size:11px;color:var(--text-dim)">MB</span>
             </div>
-            <Transition name="drop">
-              <div v-if="memPreset === '自定义'" style="display:flex;align-items:center;gap:8px">
-                <input class="set-input" style="width:100px;text-align:center" :value="getVal('max_memory','4096 MB')" placeholder="4096 MB" @change="(e: any) => onCustomMem(e)" />
-              </div>
-            </Transition>
+            <!-- 底部：刻度 + 自动开关 -->
+            <div style="display:flex;align-items:center;font-size:10px;color:var(--text-dim)">
+              <span style="width:40px">{{ memSliderMin / 1024 }} GB</span>
+              <span style="flex:1;text-align:center;color:var(--accent)">{{ memAuto && autoMemValue ? autoMemValue : '' }}</span>
+              <!-- HMCL-style 自动分配开关 -->
+              <label @click="toggleAutoMem" class="mem-auto-btn" :class="{ on: memAuto }">
+                <span class="mem-auto-track">
+                  <span class="mem-auto-knob"></span>
+                </span>
+                <span class="mem-auto-label">{{ memAuto ? '自动' : '手动' }}</span>
+              </label>
+              <span style="width:80px;text-align:right">最大 {{ (memSliderMax / 1024).toFixed(1) }} GB</span>
+            </div>
           </div>
         </div>
 
@@ -423,7 +501,11 @@ function onCustomWH(which: string, e: any) {
         </div>
         <!-- 资源下载源 -->
         <div class="set-item">
-          <span class="set-label"><span class="bl-zh">资源下载源</span><span class="bl-en">Mod Source</span></span>
+          <span class="set-label" style="position:relative">
+            <span class="bl-zh">资源下载源</span>
+            <span class="bl-en">Mod Source</span>
+            <span class="set-hint" title="CurseForge 官方源在中国大陆无法访问，建议使用镜像源（MCIMirror）。整合包安装已强制使用镜像。">?</span>
+          </span>
           <div class="toggle-group">
             <button v-for="s in modSources" :key="s" :class="['toggle-btn', { active: modSource === s }]" @click="saveModSource(s)">{{ s }}</button>
           </div>
@@ -473,13 +555,18 @@ function onCustomWH(which: string, e: any) {
               <span class="bl-zh">作者: NekoGan</span>
             </div>
             <div class="about-desc">
-              <span class="bl-zh">工业科幻仪表盘风格 Minecraft 启动器</span>
-              <span class="bl-en">Industrial Sci-Fi Dashboard Minecraft Launcher</span>
-            </div>
-            <div class="about-desc" style="margin-top:4px;font-size:11px">
-              <span class="bl-zh">开发辅助: Claude Code · DeepSeek</span>
-              <span class="bl-en">Built with: Claude Code · DeepSeek</span>
-            </div>
+            <span class="bl-zh">工业科幻仪表盘风格 Minecraft 启动器</span>
+            <span class="bl-en">Industrial Sci-Fi Dashboard Minecraft Launcher</span>
+          </div>
+          <div class="about-desc" style="font-size:11px">
+            <span class="bl-zh">启动引擎参照 HMCL / PCL / PrismLauncher</span>
+            <span class="bl-en">Launch engine based on HMCL / PCL / PrismLauncher</span>
+            &nbsp;·&nbsp; <span style="font-family:var(--font-mono);color:var(--accent)">{{ buildVer }}</span>
+          </div>
+          <div class="about-desc" style="font-size:11px">
+            <span class="bl-zh">开发辅助: Claude Code · DeepSeek</span>
+            <span class="bl-en">Built with: Claude Code · DeepSeek</span>
+          </div>
           </div>
           <a href="https://github.com/TeasOfficial" target="_blank" class="about-org-link" title="TeasOfficial">
             <img class="about-org-avatar" src="../assets/teas-avatar.png" alt="TeasOfficial" />
@@ -556,20 +643,20 @@ function onCustomWH(which: string, e: any) {
               <span class="about-tech-detail">Composition API 响应式架构，<br/>Vite 秒级热更新，<br/>完整类型推导与检查</span>
             </div>
             <div class="about-tech-item">
-              <span class="about-tech-label">工业科幻设计语言</span>
-              <span class="about-tech-detail">暗色仪表盘主题，<br/>双语 UI 系统 (中/英)，<br/>Orbitron + JetBrains Mono 字体</span>
+              <span class="about-tech-label">启动引擎</span>
+              <span class="about-tech-detail">HMCL/PCL 风格参数构建，<br/>Vec&lt;String&gt; 直传避免引号丢失，<br/>LWJGL 3.4.1 + Java 25 兼容</span>
             </div>
             <div class="about-tech-item">
               <span class="about-tech-label">多源智能下载</span>
-              <span class="about-tech-detail">Modrinth API 搜索与安装，<br/>多线程并行 + 信号量限速，<br/>BMCLAPI / MCIMirror 镜像自动回退</span>
+              <span class="about-tech-detail">Modrinth + CurseForge 搜索安装，<br/>多线程并行 + 镜像自动回退，<br/>SHA1 + 大小双重校验</span>
             </div>
             <div class="about-tech-item">
               <span class="about-tech-label">加载器自动安装</span>
-              <span class="about-tech-detail">HMCL 风格 Forge / Fabric / NeoForge 安装，<br/>原版文件自动同步，<br/>完整性校验与损坏修复</span>
+              <span class="about-tech-detail">Forge / Fabric / NeoForge / Quilt / Cleanroom，<br/>原版文件自动同步，<br/>完整性校验与损坏修复</span>
             </div>
             <div class="about-tech-item">
-              <span class="about-tech-label">系统代理集成</span>
-              <span class="about-tech-detail">Windows 注册表自动检测代理，<br/>HTTP / SOCKS5 支持，<br/>认证代理兼容</span>
+              <span class="about-tech-label">HMCL+PCL 智能内存</span>
+              <span class="about-tech-detail">自动分配算法 (Mod数量×可用内存)，<br/>HMCL 风格滑块 + 输入框，<br/>32-bit / 64-bit Java 自适应上限</span>
             </div>
           </div>
         </div>

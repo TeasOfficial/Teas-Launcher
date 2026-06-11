@@ -2,6 +2,32 @@
 import { ref, inject } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
+const activeInstance = inject<any>("activeInstance");
+
+// ★ PCL-style 版本判定: 检查 mod/game version 是否与当前实例兼容
+function getMCVersion(): string {
+  const v = activeInstance?.value?.version || "";
+  // 从版本名提取 vanilla MC 版本 (如 "13.2.2 for 26.1.2" → "26.1.2", "26.1.2" → "26.1.2")
+  const parts = v.split(" for ");
+  if (parts.length >= 2) return parts[parts.length - 1];
+  return v;
+}
+function isVersionCompatible(modVersions: string[]): boolean {
+  if (!modVersions || modVersions.length === 0) return true; // 未知 = 可能兼容
+  const mcVer = getMCVersion();
+  if (!mcVer) return true;
+  return modVersions.some(mv => {
+    // 精确匹配或前缀匹配 (如 "26.1" 匹配 "26.1.2")
+    return mv === mcVer || mcVer.startsWith(mv + ".") || mv.startsWith(mcVer + ".");
+  });
+}
+function compatBadge(modVersions: string[]): { cls: string; text: string } {
+  if (!modVersions || modVersions.length === 0) return { cls: "dl-compat-unknown", text: "版本未知" };
+  return isVersionCompatible(modVersions)
+    ? { cls: "dl-compat-ok", text: "✓ 版本匹配" }
+    : { cls: "dl-compat-warn", text: "⚠ 版本可能不兼容" };
+}
+
 type Section = "main" | "game" | "modpack" | "resource" | "search" | "detail";
 
 const active = ref<Section>("main");
@@ -44,6 +70,10 @@ async function toggleGameCard(type: string) {
     gameVersionList.value = all
       .filter((v: any) => filters.includes(v.type))
       .sort((a, b) => b.releaseTime.localeCompare(a.releaseTime));
+    // ★ 同时获取 Forge 支持的 MC 版本列表（用于标记兼容性）
+    try {
+      forgeMcVersions.value = await invoke<string[]>("fetch_forge_mc_versions");
+    } catch { forgeMcVersions.value = []; }
   } catch { /* */ }
   gameLoading.value = false;
 }
@@ -56,6 +86,7 @@ function isGameCardExpanded(itemName: string) {
 // ── 游戏版本安装对话框 ──
 const showGameInstall = ref(false);
 const selectedGameVer = ref("");
+const forgeMcVersions = ref<string[]>([]); // Forge 支持的 MC 版本 (用于标记兼容)
 const selectedLoader = ref("");
 const selectedLoaderVer = ref("");
 
@@ -85,8 +116,9 @@ async function openLoaderVersions(loaderId: string) {
       loaderVersionList.value = (list || [])
         .filter((v: any) => v.mc_version === selectedGameVer.value || v.mc_version === "")
         .map((v: any) => ({ version: v.version, stable: v.stable }));
-    } else if (loaderId === "fabric") {
-      const full = await invoke<any>("fetch_fabric_versions");
+    } else if (loaderId === "fabric" || loaderId === "quilt") {
+      const fnName = loaderId === "fabric" ? "fetch_fabric_versions" : "fetch_quilt_versions";
+      const full = await invoke<any>(fnName);
       const gameNormalized = selectedGameVer.value.replace("∞", "infinite").replace("Combat Test 7c", "1.16_combat-3");
       const supported = (full.game || []).some((g: any) => g.version === gameNormalized);
       if (supported) {
@@ -94,6 +126,11 @@ async function openLoaderVersions(loaderId: string) {
           version: v.version, stable: v.stable,
         }));
       }
+    } else if (loaderId === "cleanroom") {
+      const list = await invoke<any[]>("fetch_cleanroom_versions");
+      loaderVersionList.value = (list || []).map((v: any) => ({
+        version: v.version, stable: !v.isBeta,
+      }));
     }
   } catch { /* */ }
   loaderVersionLoading.value = false;
@@ -297,6 +334,7 @@ const sortOptions = [
 ];
 
 async function doSearch(page: number = 0) {
+  if (page === 0) searchResults.value = []; // 新搜索先清空
   searchLoading.value = true;
   searchOffset.value = page * searchLimit;
   try {
@@ -358,13 +396,14 @@ async function openDetail(project: SearchHit) {
         followers: 0, author: detail.data?.authors?.[0]?.name || "", versions: [],
       };
       const files = await invoke<any>("get_curseforge_files", { modId, source: await getModSource() });
-      const cfData = (files.data || []) as CfVersion[];
-      detailVersions.value = cfData.map((v: CfVersion) => ({
+      // CurseForge /files API 返回扁平列表 [{id, fileName, downloadUrl, fileLength}]
+      const cfData = (files.data || []) as any[];
+      detailVersions.value = cfData.map((v: any) => ({
         id: String(v.id), name: v.fileName, version_number: v.fileName,
         loaders: v.loaders || [], game_versions: v.gameVersions || [],
-        files: (v.files || [{ id: v.id, fileName: v.fileName, fileLength: 0, downloadUrl: "" }]).map(f => ({
-          filename: f.fileName, url: f.downloadUrl || "", size: f.fileLength || 0,
-        })),
+        files: [{
+          filename: v.fileName, url: v.downloadUrl || "", size: v.fileLength || 0,
+        }],
       }));
     } else {
       projectDetail.value = await invoke<ProjectDetail>("get_project", { projectId: project.project_id });
@@ -378,9 +417,11 @@ async function installCfFile(file: CfFile & { projectType: string }) {
   const taskId = addDlTask(file.fileName);
   try {
     const mcDir = await invoke<string>("get_minecraft_dir");
+    const instName = activeInstance?.value?.name || "";
     await invoke<string>("install_curseforge_file", {
       mcDir, fileId: file.id, fileName: file.fileName,
       projectType: file.projectType, source: await getModSource(),
+      instanceName: instName,
     });
     updateDlTask(taskId, "已完成");
     finishDlTask(taskId);
@@ -462,7 +503,8 @@ async function installFile(url: string, filename: string) {
     const mcDir = await invoke<string>("get_minecraft_dir");
     const source = await getModSource();
     console.log(`[DL] 调用 install_file: ${filename} source=${source} type=${currentBbsmcType.value}`);
-    const msg = await invoke<string>("install_file", { mcDir, url, filename, projectType: currentBbsmcType.value, source });
+    const instName = activeInstance?.value?.name || "";
+    const msg = await invoke<string>("install_file", { mcDir, url, filename, projectType: currentBbsmcType.value, source, instanceName: instName });
     console.log(`[DL] install_file 返回成功: "${msg}"`);
     installMsg.value = msg;
     success = true;
@@ -483,8 +525,10 @@ async function installProject(project: SearchHit) {
   installMsg.value = `正在安装 ${project.title.slice(0,30)}...`;
   try {
     const mcDir = await invoke<string>("get_minecraft_dir");
+    const instName = activeInstance?.value?.name || "";
     const msg = await invoke<string>("install_project", {
       mcDir, projectId: project.project_id, projectType: currentBbsmcType.value,
+      instanceName: instName,
     });
     installMsg.value = msg;
     setTimeout(() => { installMsg.value = ""; }, 4000);
@@ -555,6 +599,7 @@ function goBack() {
                 @click.stop="openGameInstall(v.id)">
                 <span class="dl-game-ver-id">{{ v.id }}</span>
                 <span class="dl-game-ver-type">{{ v.type }}</span>
+                <span v-if="forgeMcVersions.includes(v.id)" class="dl-forge-tag" title="Forge 可用">⚒</span>
                 <span class="dl-game-ver-time">{{ v.releaseTime.slice(0,10) }}</span>
               </div>
             </div>
@@ -614,6 +659,7 @@ function goBack() {
                 <span>⬇ {{ r.downloads }}</span>
                 <span>by {{ r.author }}</span>
                 <span v-for="v in (r.versions||[]).slice(0,5)" :key="v" class="dl-result-ver">{{ v }}</span>
+                <span v-if="getMCVersion() && currentBbsmcType !== 'modpack'" :class="'dl-compat-badge ' + compatBadge(r.versions).cls">{{ compatBadge(r.versions).text }}</span>
               </div>
             </div>
           </div>
@@ -653,6 +699,12 @@ function goBack() {
             </div>
           </div>
           <div class="dl-detail-versions">
+            <!-- 版本兼容性提示 -->
+            <div v-if="getMCVersion() && currentBbsmcType !== 'modpack'"
+              :class="'dl-compat-warn-banner ' + compatBadge(projectDetail.game_versions || []).cls"
+              style="padding:6px 12px;margin-bottom:8px;font-size:12px;border-radius:4px">
+              {{ compatBadge(projectDetail.game_versions || []).text }}（当前实例: {{ getMCVersion() }}）
+            </div>
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
               <h3 class="dl-section-title" style="margin-bottom:0;border:none"><span class="bl-zh">版本列表</span><span class="bl-en">VERSIONS</span></h3>
               <div class="custom-select" style="width:110px" @click="showDetailVerDropdown = !showDetailVerDropdown">

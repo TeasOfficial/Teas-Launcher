@@ -31,14 +31,23 @@ A modern Minecraft launcher built with **Tauri v2 + Vue 3 + Rust**, featuring an
 
 > 以下为当前已知的待办事项，按优先级排列。
 
+- [x] **启动逻辑重写** — 参照 HMCL/PCL/PrismLauncher 完全重写，LWJGL 3.4.1 + Java 25 兼容 ✅
+- [x] **Assets 资源自动补全** — 缺失资源文件自动下载 ✅
+- [x] **下载源偏好持久化** — 官方源/镜像源设置正确保存 ✅
+- [x] **Fabric 整合包兼容** — 空 `arguments.game` 自动补充默认参数 ✅
+- [x] **下载中心版本判定** — Mod/光影搜索结果显示兼容性标识 ✅
+- [x] **模组安装路径** — 版本隔离下自动定位 `versions/<name>/mods/` ✅
+- [x] **实例 MC 版本检测** — PCL 风格多源回退 (clientVersion / inheritsFrom / libraries / JAR) ✅
 - [ ] **Microsoft 正版登录** — 目前仅支持离线模式
 - [ ] **Authlib-Injector 外置登录** — 第三方验证服支持
 - [ ] **CurseForge 整合包安装** — 目前仅支持 Modrinth (.mrpack) 格式
 - [ ] **原版游戏下载** — 下载中心入口尚未接入安装流程
+- [x] **Quilt / Cleanroom 游戏安装入口** — 前端已接入 ✅
+- [ ] **OptiFine / LiteLoader / LegacyFabric / LabyMod 安装入口** — Rust 端已实现，前端待接入
 - [ ] **整合包安装后自动补全** — Forge/Fabric/NeoForge 加载器的版本 JSON / Libraries 自动下载
 - [ ] **非 ASCII 路径兼容** — Windows GBK 编码下路径含中文时的 JLW 支持
-- [ ] **启动后窗口隐藏** — 游戏启动后自动隐藏/恢复启动器窗口
-- [ ] **多语言支持** — 目前仅支持中文
+- [ ] **启动后窗口行为** — 游戏启动后自动隐藏/最小化/关闭启动器窗口
+- [ ] **多语言支持** — 目前仅支持中文 UI
 - [ ] **自动更新** — 启动器自身更新机制
 - [ ] **Linux / macOS 支持** — 目前仅支持 Windows x64
 - [ ] **测试覆盖** — 缺乏自动化测试

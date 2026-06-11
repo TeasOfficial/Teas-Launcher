@@ -169,6 +169,16 @@ pub async fn install_game(
                     &app, &mc_path, &instance_name, &mc_version, loader_ver
                 ).await?;
             }
+            "quilt" => {
+                crate::install::quilt::install_quilt_loader(
+                    &app, &mc_path, &instance_name, &mc_version, loader_ver
+                ).await?;
+            }
+            "cleanroom" => {
+                crate::install::cleanroom::install_cleanroom(
+                    &app, &mc_path, &instance_name, loader_ver
+                ).await?;
+            }
             _ => return Err(format!("不支持的加载器: {}", loader_id)),
         }
     }

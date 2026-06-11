@@ -66,6 +66,115 @@ pub(crate) fn resolve_version(
     Ok(version)
 }
 
+/// PCL-style: 从版本 JSON 中检测 MC 版本号
+///
+/// 参照 PCL McVersion.VanillaName 的完整检测链:
+/// 1. clientVersion
+/// 2. inheritsFrom
+/// 3. HMCL patches[id=game].version
+/// 4. Forge --fml.mcVersion
+/// 5. Fabric: fabricmc:intermediary:VERSION
+/// 6. Quilt: quiltmc:intermediary:VERSION
+/// 7. Forge: net.minecraftforge:forge:VERSION
+/// 8. OptiFine: optifine:OptiFine:VERSION
+/// 9. jar 字段
+fn detect_mc_version(version_dir: &std::path::Path, instance_name: &str) -> Option<String> {
+    let json_path = version_dir.join(format!("{}.json", instance_name));
+    let content = std::fs::read_to_string(&json_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // 1) clientVersion (PCL/官方格式)
+    if let Some(v) = json["clientVersion"].as_str() { return Some(v.to_string()); }
+
+    // 2) inheritsFrom
+    if let Some(v) = json["inheritsFrom"].as_str() {
+        if !v.is_empty() { return Some(v.to_string()); }
+    }
+
+    // 3) HMCL patches[id=game].version
+    if let Some(patches) = json["patches"].as_array() {
+        for p in patches {
+            if p.get("id").and_then(|i| i.as_str()) == Some("game") {
+                if let Some(v) = p["version"].as_str() { return Some(v.to_string()); }
+            }
+        }
+    }
+
+    // 4) Forge --fml.mcVersion
+    if let Some(game_args) = json["arguments"]["game"].as_array() {
+        let mut next_is_ver = false;
+        for arg in game_args {
+            if let Some(s) = arg.as_str() {
+                if next_is_ver { return Some(s.to_string()); }
+                if s == "--fml.mcVersion" { next_is_ver = true; }
+            }
+        }
+    }
+
+    // 5-8) 从 libraries 中提取 (Fabric/Quilt/Forge/OptiFine)
+    if let Some(libs) = json["libraries"].as_array() {
+        for lib in libs {
+            let name = lib["name"].as_str().unwrap_or("");
+            // Fabric: fabricmc:intermediary:VERSION
+            if name.starts_with("net.fabricmc:intermediary:") || name.starts_with("fabricmc:intermediary:") {
+                let parts: Vec<&str> = name.split(':').collect();
+                if parts.len() >= 3 { return Some(parts[2].to_string()); }
+            }
+            // Quilt: quiltmc:intermediary:VERSION
+            if name.starts_with("org.quiltmc:intermediary:") || name.starts_with("quiltmc:intermediary:") {
+                let parts: Vec<&str> = name.split(':').collect();
+                if parts.len() >= 3 { return Some(parts[2].to_string()); }
+            }
+            // Forge
+            if name.starts_with("net.minecraftforge:forge:") {
+                let parts: Vec<&str> = name.split(':').collect();
+                if parts.len() >= 3 {
+                    let v = parts[2];
+                    // forge:X.Y.Z-W → X.Y.Z
+                    if let Some(dash) = v.find('-') { return Some(v[..dash].to_string()); }
+                    return Some(v.to_string());
+                }
+            }
+            // OptiFine
+            if name.starts_with("optifine:OptiFine:") {
+                let parts: Vec<&str> = name.split(':').collect();
+                if parts.len() >= 3 {
+                    let v = parts[2].strip_prefix("HD_U_").unwrap_or(parts[2]);
+                    if let Some(underscore) = v.find('_') { return Some(v[..underscore].to_string()); }
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+
+    // 9) jar 字段
+    if let Some(v) = json["jar"].as_str() {
+        if !v.is_empty() { return Some(v.to_string()); }
+    }
+
+    // 10) PCL: 从主 JAR 内嵌的 version.json 读取
+    let jar_path = version_dir.join(format!("{}.jar", instance_name));
+    if jar_path.exists() {
+        if let Ok(file) = std::fs::File::open(&jar_path) {
+            if let Ok(mut archive) = zip::ZipArchive::new(file) {
+                if let Ok(entry) = archive.by_name("version.json") {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    if let Ok(_) = std::io::BufReader::new(entry).read_to_string(&mut buf) {
+                        if let Ok(vj) = serde_json::from_str::<serde_json::Value>(&buf) {
+                            if let Some(id) = vj["id"].as_str() {
+                                return Some(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// 修复实例 — 补全缺失文件
 #[tauri::command]
 pub(crate) async fn fix_instance(
@@ -165,8 +274,7 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
                     else { format!("{} 天前", diff / 86400) }
                 })
                 .unwrap_or_else(|| "从未".to_string());
-            let mc_version = read_json_field(&path, &name, "inheritsFrom")
-                .or_else(|| read_json_field(&path, &name, "clientVersion"))
+            let mc_version = detect_mc_version(&path, &name)
                 .unwrap_or_else(|| name.clone());
             instances.push(serde_json::json!({
                 "name": name,

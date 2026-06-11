@@ -22,7 +22,7 @@ use crate::download::engine::download_file;
 use crate::download::model::{DownloadFile, FileChecker};
 use crate::download::source::source_launcher_or_meta;
 use crate::instance::resolve_version;
-use crate::utils::{is_jar_valid, offline_uuid, scan_and_fix_jars_with_strategy, JarScanStrategy};
+use crate::utils::{offline_uuid, scan_and_fix_jars_with_strategy, JarScanStrategy};
 use crate::version::library::mclib_from_instance;
 use crate::version::assets::{mcassets_fix_list, mcassets_get_index_name, download_asset_index};
 use crate::BUILD;
@@ -75,6 +75,7 @@ pub(crate) fn is_instance_running() -> bool {
 
 /// 结构化启动参数
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct LaunchContext {
     mc_dir: PathBuf,
     dot_minecraft: PathBuf,
@@ -139,11 +140,12 @@ impl LaunchContext {
             .unwrap_or(serde_json::json!({}));
 
         // 前端使用 game_source key，值为 "官方源" 或 "BMCLAPI"
+        // 默认使用官方源
         let prefer_official = cfg
             .get("game_source")
             .and_then(|v| v.as_str())
-            .map(|s| s == "官方源")
-            .unwrap_or(false);
+            .map(|s| s != "BMCLAPI") // 非 BMCLAPI 即为官方源
+            .unwrap_or(true);
 
         let gc_mode = match cfg.get("gc_mode").and_then(|v| v.as_str()).unwrap_or("auto") {
             "g1gc" => GcMode::G1GC,
@@ -1833,6 +1835,7 @@ fn split_args_keep_quoting(input: &str) -> Vec<String> {
 }
 
 /// PCL-style: 检查 args 中是否已存在某个前缀的参数
+#[allow(dead_code)]
 fn has_arg_prefix(args: &[String], prefix: &str) -> bool {
     args.iter().any(|a| a.starts_with(prefix))
 }

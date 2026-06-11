@@ -64,6 +64,7 @@ pub fn run() {
             curseforge::install_curseforge_file,
             // ── 整合包安装 ──
             modpack::install_modpack,
+            modpack::install_local_modpack,
             // ── 游戏安装 (新) ──
             install::vanilla::install_game,
             // ── HTTP ──
@@ -79,6 +80,8 @@ pub fn run() {
             system::test_proxy_connectivity,
             system::detect_system_proxy,
             system::scan_java,
+            system::get_memory_info,
+            system::calc_auto_memory,
             // ── 版本清单获取 ──
             version::manifest::fetch_version_manifest,
             version::manifest::fetch_forge_mc_versions,

@@ -18,7 +18,7 @@ pub async fn install_modpack(
     app: tauri::AppHandle,
     mc_dir: String,
     url: String,
-    filename: String,
+    _filename: String,
     instance_name: String,
     source: String,
     dl_threads: u32,
@@ -28,19 +28,41 @@ pub async fn install_modpack(
     let mc_path = if base.join(".minecraft").exists() { base.join(".minecraft") } else { base.to_path_buf() };
     let target = mc_path.join("versions").join(&instance_name);
     if target.exists() {
-        return Err(format!("实例 {} 已存在", instance_name));
+        // 清理上次失败的残留
+        let _ = std::fs::remove_dir_all(&target);
     }
+    // 清理残留的临时文件
+    let tmp_file_clean = mc_path.join(format!(".tmp_{}.zip", instance_name));
+    let tmp_dir_clean = mc_path.join(format!(".tmp_{}", instance_name));
+    let _ = std::fs::remove_file(&tmp_file_clean);
+    let _ = std::fs::remove_dir_all(&tmp_dir_clean);
 
-    // Phase 1: 下载整合包文件
-    let mirror_url = apply_source(&url, &source);
-    let urls: Vec<String> = if mirror_url != url {
-        vec![mirror_url, url.clone()]
-    } else {
-        vec![url.clone()]
-    };
+    // Phase 1: 下载/复制整合包文件
     let tmp_file = mc_path.join(format!(".tmp_{}.zip", instance_name));
-    let mut dl = DownloadFile::new(urls, tmp_file.clone(), FileChecker::with_min_size(1024));
-    download_file(&app, &mut dl, false).await?;
+    if url.starts_with("file:///") || url.len() >= 2 && url.chars().nth(1) == Some(':') {
+        let local_path = url.strip_prefix("file:///").unwrap_or(&url).replace('/', "\\");
+        let file_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
+        let size_mb = file_size as f64 / 1048576.0;
+        eprintln!("[modpack] copying local file: {} -> {} ({} MB)", local_path, tmp_file.display(), size_mb as u64);
+        app.emit("download-progress", serde_json::json!({
+            "filename": &instance_name, "downloaded": 0u64, "total": file_size, "percent": 0,
+            "step": format!("复制整合包 ({} MB)...", size_mb as u64)
+        })).ok();
+        std::fs::copy(&local_path, &tmp_file).map_err(|e| format!("复制文件失败: {}", e))?;
+        app.emit("download-progress", serde_json::json!({
+            "filename": &instance_name, "downloaded": file_size, "total": file_size, "percent": 5,
+            "step": "复制完成，准备解压..."
+        })).ok();
+    } else {
+        let mirror_url = apply_source(&url, &source);
+        let urls: Vec<String> = if mirror_url != url {
+            vec![mirror_url, url.clone()]
+        } else {
+            vec![url.clone()]
+        };
+        let mut dl = DownloadFile::new(urls, tmp_file.clone(), FileChecker::with_min_size(1024));
+        download_file(&app, &mut dl, false).await?;
+    }
 
     // Phase 2: 解压 + 格式检测
     let tmp_dir = mc_path.join(format!(".tmp_{}", instance_name));
@@ -49,6 +71,14 @@ pub async fn install_modpack(
 
     let file = std::fs::File::open(&tmp_file).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法读取: {}", e))?;
+    let total_entries = archive.len();
+    eprintln!("[modpack] extracting {} entries", total_entries);
+    app.emit("download-progress", serde_json::json!({
+        "filename": &instance_name, "downloaded": 0u64, "total": total_entries as u64, "percent": 5,
+        "step": format!("解压整合包 ({} MB，{} 个文件)...", archive.len(), archive.len())
+    })).ok();
+
+    let mut extracted = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
@@ -59,10 +89,25 @@ pub async fn install_modpack(
         }
         let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        extracted += 1;
+        if extracted % 500 == 0 || extracted == total_entries as u64 {
+            let pct = 5u32 + ((extracted as f64 / total_entries as f64) * 10.0) as u32;
+            let _ = app.emit("download-progress", serde_json::json!({
+                "filename": &instance_name, "downloaded": extracted, "total": total_entries as u64,
+                "percent": pct, "step": format!("解压中 ({}/{})...", extracted, total_entries)
+            }));
+        }
     }
     let _ = std::fs::remove_file(&tmp_file);
+    eprintln!("[modpack] extraction done");
 
     let is_curseforge = tmp_dir.join("manifest.json").exists();
+    eprintln!("[modpack] is_curseforge={}", is_curseforge);
+
+    app.emit("download-progress", serde_json::json!({
+        "filename": &instance_name, "downloaded": total_entries as u64, "total": total_entries as u64, "percent": 15,
+        "step": "解压完成，准备复制文件..."
+    })).ok();
 
     // Phase 3: 复制 overrides
     if is_curseforge {
@@ -88,13 +133,16 @@ pub async fn install_modpack(
 
     // Phase 4: 按格式下载 Mod
     if is_curseforge {
-        // CurseForge 格式
         let cf_path = tmp_dir.join("manifest.json");
         let content = std::fs::read_to_string(&cf_path).map_err(|e| e.to_string())?;
         let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let file_count = manifest["files"].as_array().map(|a| a.len()).unwrap_or(0);
+        app.emit("download-progress", serde_json::json!({
+            "filename": &instance_name, "downloaded": 0, "total": file_count as u64, "percent": 20,
+            "step": format!("查询 {} 个 CurseForge Mod 下载地址...", file_count)
+        })).ok();
         download_curseforge_mods(&app, &client, &manifest, &target, &instance_name, dl_threads).await?;
     } else {
-        // Modrinth 格式
         let mr_path = tmp_dir.join("modrinth.index.json");
         if !mr_path.exists() {
             let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -105,12 +153,22 @@ pub async fn install_modpack(
         if let Some(files) = index["files"].as_array() {
             let total = files.len();
             if total > 0 {
+                let name = index["name"].as_str().unwrap_or("整合包");
+                app.emit("download-progress", serde_json::json!({
+                    "filename": &instance_name, "downloaded": 0, "total": total as u64, "percent": 20,
+                    "step": format!("{}：下载 {} 个 Modrinth Mod...", name, total)
+                })).ok();
                 download_modrinth_mods(&app, &client, files, &target, &instance_name, total, dl_threads).await;
             }
         }
     }
 
     // Phase 5: 解析依赖 + 安装 loader
+    app.emit("download-progress", serde_json::json!({
+        "filename": &instance_name, "downloaded": 0, "total": 100, "percent": 70,
+        "step": "解析整合包依赖..."
+    })).ok();
+
     let (loader_type, loader_ver, mc_ver) = if is_curseforge {
         let cf_path = tmp_dir.join("manifest.json");
         let content = std::fs::read_to_string(&cf_path).map_err(|e| e.to_string())?;
@@ -123,9 +181,12 @@ pub async fn install_modpack(
         crate::install::merge::parse_modpack_deps(&index)
     };
 
+    let loader_desc = if !mc_ver.is_empty() {
+        format!("安装 {} {} (MC {})...", loader_type, loader_ver, mc_ver)
+    } else { "安装原版 Minecraft...".into() };
     app.emit("download-progress", serde_json::json!({
-        "filename": &instance_name, "downloaded": 75, "total": 100, "percent": 75,
-        "step": "正在安装加载器..."
+        "filename": &instance_name, "downloaded": 0, "total": 100, "percent": 80,
+        "step": loader_desc
     })).ok();
 
     if !mc_ver.is_empty() {
@@ -195,7 +256,16 @@ async fn download_modrinth_mods(
             if is_cancelled() { return; }
             let durls = source_mod_download(&dl, 1);
             let dest = tgt.join(&path_str);
-            if dest.exists() { return; }
+            if dest.exists() {
+                let n = cnt.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = a.emit("download-progress", serde_json::json!({
+                    "batch_id": 1, "batch_total": total_u, "batch_done": n,
+                    "file_name": fname, "file_percent": 100, "file_total": 1,
+                    "aggregated_percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
+                    "step": format!("下载模组 ({}/{}) {}", n, total_u, fname)
+                }));
+                return;
+            }
             if let Some(p) = dest.parent() { let _ = std::fs::create_dir_all(p); }
             for u in &durls {
                 if is_cancelled() { return; }
@@ -208,9 +278,10 @@ async fn download_modrinth_mods(
             }
             let n = cnt.fetch_add(1, Ordering::Relaxed) + 1;
             let _ = a.emit("download-progress", serde_json::json!({
-                "filename": iname, "downloaded": n as u64, "total": total_u,
-                "percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
-                "step": format!("下载模组 ({}/{})：{}", n, total_u, fname)
+                "batch_id": 1, "batch_total": total_u, "batch_done": n,
+                "file_name": fname, "file_percent": 100, "file_total": 1,
+                "aggregated_percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
+                "step": format!("下载模组 ({}/{}) {}", n, total_u, fname)
             }));
         }));
     }
@@ -239,17 +310,17 @@ async fn download_curseforge_mods(
     eprintln!("[modpack] CurseForge: 请求 {} 个 Mod 的下载信息", file_ids.len());
 
     // PCL: POST https://api.curseforge.com/v1/mods/files
-    // 先尝试镜像，再直连
     let request_body = serde_json::json!({"fileIds": &file_ids});
     let mut response_json: Option<serde_json::Value> = None;
+    let cf_key = "$2a$10$imvudMuNk5ycqn5MTRUvRua3DfgOMk28hJSpWAENkG8bVJWDO5sRW";
 
     for (url, timeout) in &[
-        ("https://mod.mcimirror.top/curseforge/v1/mods/files", 15u64),
-        ("https://api.curseforge.com/v1/mods/files", 10u64),
+        ("https://api.curseforge.com/v1/mods/files", 15u64),
+        ("https://mod.mcimirror.top/curseforge/v1/mods/files", 10u64),
     ] {
         match client.post(*url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
+            .header("x-api-key", cf_key)
             .json(&request_body)
             .timeout(Duration::from_secs(*timeout))
             .send()
@@ -289,8 +360,15 @@ async fn download_curseforge_mods(
     }
 
     eprintln!("[modpack] CurseForge: 解析到 {} 个下载链接", url_map.len());
+    let actual_total = url_map.len();
 
-    // 多线程下载
+    app.emit("download-progress", serde_json::json!({
+        "filename": instance_name, "downloaded": 0u64, "total": actual_total as u64, "percent": 25,
+        "step": format!("下载 {} 个 Mod (共 {} 个文件)...", actual_total, total)
+    })).ok();
+
+    // 多线程下载 (短超时客户端，快速失败→回退)
+    let dl_client = std::sync::Arc::new(build_http_client(Duration::from_secs(60))?);
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(dl_threads.max(1) as usize));
     let counter = std::sync::Arc::new(AtomicU32::new(0));
     let mut handles = Vec::new();
@@ -299,43 +377,52 @@ async fn download_curseforge_mods(
         let fid = f["fileID"].as_i64().unwrap_or(0);
         let Some(dl_url) = url_map.get(&fid).cloned() else { continue; };
         let fname = name_map.get(&fid).cloned().unwrap_or_else(|| format!("{}.jar", fid));
-        let required = f["required"].as_bool().unwrap_or(true);
+        let _required = f["required"].as_bool().unwrap_or(true);
 
-        let c = client.clone(); let a = app.clone(); let s = sem.clone();
+        let c = dl_client.clone(); let a = app.clone(); let s = sem.clone();
         let cnt = counter.clone(); let tgt = target.to_path_buf();
         let iname = instance_name.to_string();
-        let total_u = total as u64;
+        let total_u = actual_total as u64;
 
         handles.push(tokio::spawn(async move {
             let _p = s.acquire().await.unwrap();
             if is_cancelled() { return; }
             let dest = tgt.join("mods").join(&fname);
-            if dest.exists() { return; }
+            if dest.exists() {
+                let n = cnt.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = a.emit("download-progress", serde_json::json!({
+                    "batch_id": 1, "batch_total": total_u, "batch_done": n,
+                    "file_name": fname, "file_percent": 100, "file_total": 1,
+                    "aggregated_percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
+                    "step": format!("下载模组 ({}/{}) {}", n, total_u, fname)
+                }));
+                return;
+            }
             if let Some(p) = dest.parent() { let _ = std::fs::create_dir_all(p); }
 
-            // PCL: 镜像源回退
-            let urls = if dl_url.contains("edge.forgecdn.net") || dl_url.contains("mediafilez.forgecdn.net") {
-                let mirror = dl_url.replace("edge.forgecdn.net", "mod.mcimirror.top")
-                    .replace("mediafilez.forgecdn.net", "mod.mcimirror.top");
-                vec![mirror, dl_url]
-            } else {
-                vec![dl_url]
-            };
+            let url = dl_url
+                .replace("edge.forgecdn.net", "mod.mcimirror.top")
+                .replace("mediafilez.forgecdn.net", "mod.mcimirror.top")
+                .replace("media.forgecdn.net", "mod.mcimirror.top");
 
-            for u in &urls {
-                if is_cancelled() { return; }
-                if let Ok(resp) = c.get(u).send().await {
-                    if let Ok(bytes) = resp.bytes().await {
-                        let _ = std::fs::write(&dest, &bytes);
-                        break;
+            let mut ok = false;
+            if !is_cancelled() {
+                match c.get(&url).send().await {
+                    Ok(resp) => {
+                        if let Ok(bytes) = resp.bytes().await {
+                            if bytes.len() > 0 { let _ = std::fs::write(&dest, &bytes); ok = true; }
+                        }
                     }
+                    Err(e) => eprintln!("[modpack] download {} failed: {}", url, e),
                 }
             }
             let n = cnt.fetch_add(1, Ordering::Relaxed) + 1;
             let _ = a.emit("download-progress", serde_json::json!({
-                "filename": iname, "downloaded": n as u64, "total": total_u,
-                "percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
-                "step": format!("下载模组 ({}/{})：{}", n, total_u, fname)
+                "batch_id": 1, "batch_total": total_u, "batch_done": n,
+                "file_name": fname, "file_percent": if ok { 100 } else { 0 },
+                "file_total": 1, "file_speed": 0u64,
+                "aggregated_percent": 25 + ((n as f64 / total_u as f64) * 50.0) as u32,
+                "step": format!("下载模组 ({}/{}) {}", n, total_u, fname)
             }));
         }));
     }
@@ -414,6 +501,7 @@ async fn install_loader_with_vanilla_merge(
     output.as_object_mut().map(|o| o.remove("inheritsFrom"));
     output.as_object_mut().map(|o| o.remove("_comment_"));
     output["id"] = serde_json::Value::String(instance_name.to_string());
+    output["clientVersion"] = serde_json::Value::String(mc_ver.to_string());
 
     let json_path = target.join(format!("{}.json", instance_name));
     std::fs::write(&json_path, serde_json::to_string_pretty(&output).unwrap_or_default())
@@ -508,6 +596,7 @@ async fn install_forgelike_with_vanilla_merge(
     output.as_object_mut().map(|o| o.remove("inheritsFrom"));
     output.as_object_mut().map(|o| o.remove("_comment_"));
     output["id"] = serde_json::Value::String(instance_name.to_string());
+    output["clientVersion"] = serde_json::Value::String(mc_ver.to_string());
 
     let json_path = target.join(format!("{}.json", instance_name));
     std::fs::write(&json_path, serde_json::to_string_pretty(&output).unwrap_or_default())
@@ -533,7 +622,7 @@ async fn install_forgelike_with_vanilla_merge(
 }
 
 async fn install_vanilla_direct(
-    app: &tauri::AppHandle, mc_dir: &Path, instance_name: &str, mc_ver: &str, client: &reqwest::Client,
+    _app: &tauri::AppHandle, mc_dir: &Path, instance_name: &str, mc_ver: &str, _client: &reqwest::Client,
 ) -> Result<(), String> {
     let target = mc_dir.join("versions").join(instance_name);
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
@@ -541,6 +630,27 @@ async fn install_vanilla_direct(
     std::fs::write(target.join(format!("{}.json", instance_name)), serde_json::to_string_pretty(&inherits).unwrap_or_default())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 安装本地整合包文件 (拖放安装)
+#[tauri::command]
+pub async fn install_local_modpack(
+    app: tauri::AppHandle,
+    mc_dir: String,
+    file_path: String,
+    pack_name: String,
+) -> Result<String, String> {
+    eprintln!("[modpack] install_local: path={}, name={}", file_path, pack_name);
+    app.emit("download-progress", serde_json::json!({
+        "filename": &pack_name, "downloaded": 1, "total": 100, "percent": 1,
+        "step": "正在准备..."
+    })).ok();
+
+    // 使用 file:// 协议传递本地路径
+    let local_url = format!("file:///{}", file_path.replace('\\', "/"));
+    let result = install_modpack(app.clone(), mc_dir, local_url, String::new(), pack_name, "local".into(), 8).await;
+    eprintln!("[modpack] install_local result: {:?}", result.as_ref().map(|_| "ok").unwrap_or_else(|e| e));
+    result
 }
 
 async fn download_json_to_memory(client: &reqwest::Client, mc_ver: &str) -> Result<serde_json::Value, String> {

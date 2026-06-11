@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, provide, onMounted } from "vue";
+import { ref, computed, provide, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar.vue";
 import StatusBar from "./components/StatusBar.vue";
 import DashboardPage from "./components/DashboardPage.vue";
@@ -71,7 +73,94 @@ export interface Account {
 const instances = ref<Instance[]>([]);
 const accounts = ref<Account[]>([]);
 
+// ── 拖放安装整合包 (PCL/HMCL-style) ──
+const dragOver = ref(false);
+const dragFileName = ref("");
+const dragFilePath = ref("");
+const dragInstalling = ref(false);
+const showDropDialog = ref(false);
+const dropInstanceName = ref("");
+
+async function handleFileDrop(paths: string[]) {
+  if (dragInstalling.value) return;
+  const file = paths[0] || "";
+  const ext = file.toLowerCase();
+  if (!ext.endsWith(".mrpack") && !ext.endsWith(".zip")) return;
+
+  dragOver.value = false;
+  dragFilePath.value = file;
+  dragFileName.value = file.split("\\").pop() || file;
+  // 默认实例名 = 文件名去扩展名
+  dropInstanceName.value = dragFileName.value.replace(/\.(mrpack|zip)$/i, "");
+  showDropDialog.value = true;
+}
+
+async function confirmDropInstall() {
+  if (!dropInstanceName.value.trim()) return;
+  const name = dropInstanceName.value.trim();
+  showDropDialog.value = false;
+
+  const taskId = addDlTask(name);
+  updateDlTask(taskId, "准备安装...");
+  currentPage.value = "dlTasks";
+
+  // ★ 直接监听进度事件，更新任务状态
+  type ProgressPayload = { filename: string; step?: string; percent?: number };
+  const unlisten = await listen<ProgressPayload>("download-progress", (event) => {
+    const p = event.payload;
+    if (p.filename === name && p.step) {
+      updateDlTask(taskId, p.step);
+    }
+  });
+
+  try {
+    const mcDir = await invoke<string>("get_minecraft_dir");
+    await invoke<string>("install_local_modpack", {
+      mcDir, filePath: dragFilePath.value, packName: name,
+    });
+    updateDlTask(taskId, "安装完成");
+    finishDlTask(taskId);
+    instances.value = await invoke<Instance[]>("list_instances", { mcDir });
+  } catch (e: any) {
+    updateDlTask(taskId, "安装失败");
+    finishDlTask(taskId, String(e));
+    alert("安装失败: " + String(e));
+  }
+  unlisten();
+  dragFilePath.value = "";
+  dragFileName.value = "";
+}
+
+let unlistenDrop: (() => void) | undefined;
+let unlistenDragOver: (() => void) | undefined;
+
+// 拖放 hover 事件
+const onDragOverHandler = (e: DragEvent) => {
+  e.preventDefault();
+  if (e.dataTransfer?.types.includes("Files")) {
+    dragOver.value = true;
+    dragFileName.value = e.dataTransfer?.files[0]?.name || "";
+  }
+};
+const onDragLeaveHandler = () => { dragOver.value = false; };
+
 onMounted(async () => {
+  // 监听 Tauri v2 拖放事件
+  try {
+    const win = getCurrentWindow();
+    unlistenDrop = await win.onDragDropEvent((event) => {
+      if (event.payload.type === "drop") {
+        const paths: string[] = (event.payload as any).paths || [];
+        if (paths.length > 0) handleFileDrop(paths);
+      }
+    });
+    console.log("[drop] drag-drop listener registered");
+  } catch (e) {
+    console.warn("[drop] Failed to register:", e);
+  }
+  window.addEventListener("dragover", onDragOverHandler);
+  window.addEventListener("dragleave", onDragLeaveHandler);
+
   try {
     const mcDir = await invoke<string>("get_minecraft_dir");
     instances.value = await invoke<Instance[]>("list_instances", { mcDir });
@@ -92,6 +181,12 @@ onMounted(async () => {
   } catch { /* */ }
 
   // 下载进度事件由 DownloadsTaskPage 管理（聚合进度 + per-file 详情）
+});
+
+onUnmounted(() => {
+  if (unlistenDrop) unlistenDrop();
+  window.removeEventListener("dragover", onDragOverHandler);
+  window.removeEventListener("dragleave", onDragLeaveHandler);
 });
 
 
@@ -154,5 +249,45 @@ function navigate(page: string) {
     <Transition name="page" mode="out-in">
       <component :is="pageComponent" :key="currentPage" @select-instance="selectAndGo" @navigate="navigate" />
     </Transition>
+
+    <!-- 拖放整合包浮层提示 -->
+    <Transition name="modal">
+      <div v-if="dragOver && !dragInstalling" class="drop-hint">
+        <span style="font-size:28px">📦</span>
+        <span class="bl-zh" style="font-size:14px;font-weight:600;color:var(--accent)">松开以安装整合包</span>
+        <span class="bl-en" style="font-size:11px;color:var(--text-dim)">{{ dragFileName }}</span>
+      </div>
+    </Transition>
+
+    <!-- 安装确认对话框 -->
+    <Transition name="modal">
+      <div v-if="showDropDialog" class="modal-overlay" @click.self="showDropDialog = false">
+        <div class="modal-panel" style="width:420px;padding:24px">
+          <div class="modal-header">
+            <span class="bl-zh">安装整合包</span>
+            <span class="bl-en">INSTALL MODPACK</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px;margin-top:16px">
+            <div>
+              <span class="bl-zh" style="font-size:12px;color:var(--text-dim)">文件名</span>
+              <div style="font-size:13px;color:var(--secondary);word-break:break-all">{{ dragFileName }}</div>
+            </div>
+            <div>
+              <span class="bl-zh" style="font-size:12px;color:var(--text-dim)">实例名称</span>
+              <input class="form-input" v-model="dropInstanceName" @keyup.enter="confirmDropInstall"
+                style="width:100%;margin-top:4px;font-size:14px" placeholder="输入实例名称" />
+            </div>
+          </div>
+          <div class="modal-actions" style="margin-top:20px;justify-content:flex-end">
+            <button class="acct-new-btn" @click="showDropDialog = false" style="color:var(--text-dim);border-color:var(--border)">取消</button>
+            <button class="acct-new-btn" @click="confirmDropInstall" :disabled="!dropInstanceName.trim()">确认安装</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </main>
 </template>
+
+<style scoped>
+.drop-hint{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:6px;background:var(--bg-panel);border:2px dashed var(--accent);border-radius:10px;padding:16px 32px;text-align:center;z-index:100;pointer-events:none}
+</style>

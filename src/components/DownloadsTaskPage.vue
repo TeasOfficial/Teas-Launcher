@@ -126,8 +126,11 @@ onMounted(async () => {
     progressMap.value = { ...progressMap.value, [task.id]: agg };
 
     // ── 更新任务状态显示 ──
-    if (p.batch_total > 1) {
-      task.status = `下载中 ${p.aggregated_percent}% (${p.batch_done}/${p.batch_total})`;
+    if (!p.batch_total && !p.file_percent && p.step) {
+      // 自定义阶段描述（如整合包安装的"解压中..."，没有批量/文件进度时使用）
+      task.status = p.step;
+    } else if (p.batch_total > 1) {
+      task.status = `下载中 ${p.aggregated_percent || 0}% (${p.batch_done}/${p.batch_total})`;
     } else if (p.file_percent < 100) {
       task.status = `下载中 ${p.file_percent}% — ${p.file_name}`;
     } else {

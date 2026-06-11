@@ -207,3 +207,84 @@ pub(crate) fn scan_java() -> Vec<serde_json::Value> {
     }
     result
 }
+
+/// 获取系统内存信息 (MB)
+#[tauri::command]
+pub fn get_memory_info(sys: tauri::State<'_, Mutex<System>>) -> (u64, u64) {
+    let s = sys.lock().unwrap();
+    // sysinfo 0.33: total_memory / available_memory 已废弃，用 System 方法
+    let total = s.total_memory() / 1024 / 1024; // bytes → MB
+    // 无直接 available，用 free 近似
+    let free = s.free_memory() / 1024 / 1024;
+    (total, free)
+}
+
+/// 自动计算推荐内存分配 (MB)
+///
+/// 整合 HMCL getAllocatedMemory + PCL GetRam:
+/// - 基础需求根据实例类型 + Mod 数量确定 (PCL 风格)
+/// - 可用内存分段分配 (PCL 风格阶段分配)
+/// - 系统保留 512MB (HMCL 风格)
+/// - 上限 16GB (HMCL 风格)
+/// - 32-bit Java 上限 ~1.3GB
+#[tauri::command]
+pub fn calc_auto_memory(
+    total_mem_mb: u64,
+    available_mem_mb: u64,
+    is_64bit_java: bool,
+    mod_count: u32,
+    has_mod_loader: bool,
+) -> u32 {
+    let total_gb = total_mem_mb as f64 / 1024.0;
+    let mut available_gb = available_mem_mb as f64 / 1024.0;
+
+    // HMCL: 系统保留 512MB
+    available_gb -= 0.5;
+    if available_gb <= 0.0 {
+        return 512; // 最低 512MB
+    }
+
+    // PCL: 根据实例类型确定基础内存需求目标
+    let (ram_min, ram_t1, ram_t2, ram_t3) = if has_mod_loader {
+        // 可安装 Mod 的版本 (Forge/Fabric/NeoForge)
+        let mc = mod_count as f64;
+        (0.5 + mc / 150.0, 1.5 + mc / 90.0, 2.7 + mc / 50.0, 4.5 + mc / 25.0)
+    } else {
+        // 普通原版
+        (0.5, 1.5, 2.5, 4.0)
+    };
+
+    let mut ram_give = 0.0;
+
+    // 阶段一: 0 → T1，100% 分配
+    let delta = ram_t1;
+    ram_give += f64::min(delta, available_gb);
+    available_gb -= delta;
+    if available_gb < 0.1 { return (ram_give * 1024.0) as u32; }
+
+    // 阶段二: T1 → T2，70% 分配
+    let delta = ram_t2 - ram_t1;
+    ram_give += f64::min(available_gb * 0.7, delta);
+    available_gb -= delta / 0.7;
+    if available_gb < 0.1 { return (ram_give * 1024.0) as u32; }
+
+    // 阶段三: T2 → T3，40% 分配
+    let delta = ram_t3 - ram_t2;
+    ram_give += f64::min(available_gb * 0.4, delta);
+    available_gb -= delta / 0.4;
+    if available_gb < 0.1 { return (ram_give * 1024.0) as u32; }
+
+    // 阶段四: T3 → T3*2，15% 分配
+    let delta = ram_t3;
+    ram_give += f64::min(available_gb * 0.15, delta);
+
+    // HMCL: 上限 16GB
+    let ram_cap = 16.0_f64;
+    let ram_max = f64::min(ram_cap, total_gb * 0.75);
+
+    // 32-bit Java 上限 ~1.3GB
+    let ram_arch_cap = if is_64bit_java { ram_max } else { f64::min(1.3, ram_max) };
+
+    let result = if ram_give < 0.5 { 0.5 } else if ram_give > ram_arch_cap { ram_arch_cap } else { ram_give };
+    (result * 1024.0) as u32
+}

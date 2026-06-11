@@ -85,6 +85,7 @@ pub(crate) async fn install_project(
     mc_dir: String,
     project_id: String,
     project_type: String,
+    instance_name: String,
 ) -> Result<String, String> {
     let client = build_http_client(Duration::from_secs(30))?;
 
@@ -109,17 +110,20 @@ pub(crate) async fn install_project(
     let file_name = file["filename"].as_str().ok_or("文件名不存在")?;
 
     let base = std::path::Path::new(&mc_dir);
+    // ★ HMCL/PCL: 版本隔离下 gameDir = versions/<name>/
     let dot_minecraft = if base.join(".minecraft").exists() {
         base.join(".minecraft")
     } else {
         base.to_path_buf()
     };
+    let vd = dot_minecraft.join("versions").join(&instance_name);
+    let game_dir = if !instance_name.is_empty() && vd.exists() { &vd } else { &dot_minecraft };
     let target_dir = match project_type.as_str() {
-        "mod" => dot_minecraft.join("mods"),
-        "shader" => dot_minecraft.join("shaderpacks"),
-        "resourcepack" => dot_minecraft.join("resourcepacks"),
-        "datapack" => dot_minecraft.join("datapacks"),
-        "map" => dot_minecraft.join("saves"),
+        "mod" => game_dir.join("mods"),
+        "shader" => game_dir.join("shaderpacks"),
+        "resourcepack" => game_dir.join("resourcepacks"),
+        "datapack" => game_dir.join("datapacks"),
+        "map" => game_dir.join("saves"),
         _ => dot_minecraft.to_path_buf(),
     };
     std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
@@ -147,23 +151,28 @@ pub(crate) async fn install_file(
     filename: String,
     project_type: String,
     source: String,
+    instance_name: String,
 ) -> Result<String, String> {
     let original_url = url.clone();
     let mirror_url = apply_source(&url, &source);
     reset_cancel();
     let base = std::path::Path::new(&mc_dir);
-    let dm = if base.join(".minecraft").exists() {
+    // ★ HMCL/PCL: 版本隔离下 gameDir = versions/<name>/
+    // mods/resourcepacks/shaderpacks 必须放到 gameDir 下 MC 才能识别
+    let dot_minecraft = if base.join(".minecraft").exists() {
         base.join(".minecraft")
     } else {
         base.to_path_buf()
     };
+    let vd = dot_minecraft.join("versions").join(&instance_name);
+    let game_dir = if !instance_name.is_empty() && vd.exists() { &vd } else { &dot_minecraft };
     let td = match project_type.as_str() {
-        "mod" => dm.join("mods"),
-        "shader" => dm.join("shaderpacks"),
-        "resourcepack" => dm.join("resourcepacks"),
-        "datapack" => dm.join("datapacks"),
-        "map" => dm.join("saves"),
-        _ => dm.to_path_buf(),
+        "mod" => game_dir.join("mods"),
+        "shader" => game_dir.join("shaderpacks"),
+        "resourcepack" => game_dir.join("resourcepacks"),
+        "datapack" => game_dir.join("datapacks"),
+        "map" => game_dir.join("saves"),
+        _ => game_dir.to_path_buf(),
     };
     std::fs::create_dir_all(&td).map_err(|e| e.to_string())?;
     let dest = td.join(&filename);
