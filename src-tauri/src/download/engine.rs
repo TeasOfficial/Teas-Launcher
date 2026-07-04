@@ -41,22 +41,6 @@ pub struct DownloadResult {
     pub errors: Vec<String>,
 }
 
-/// 全局下载速度统计
-#[allow(dead_code)]
-static GLOBAL_SPEED: AtomicU64 = AtomicU64::new(0);
-#[allow(dead_code)]
-static GLOBAL_ACTIVE: AtomicU64 = AtomicU64::new(0);
-
-#[allow(dead_code)]
-pub fn global_speed() -> u64 {
-    GLOBAL_SPEED.load(Ordering::Relaxed)
-}
-
-#[allow(dead_code)]
-pub fn global_active() -> u64 {
-    GLOBAL_ACTIVE.load(Ordering::Relaxed)
-}
-
 /// 批量下载进度追踪器 — 跨线程共享
 ///
 /// 前端使用 `batch_id` 将多次文件下载事件聚合到同一个任务卡片上，
@@ -165,11 +149,10 @@ pub async fn download_file(
     }
 
     // 3) 清理可能的残留临时文件
-    cleanup_temp(&file.local_path);
+    cleanup_temp(&file.local_path).await;
 
     // 4) 遍历所有 URL，每个最多重试 3 次
     file.state = DownloadState::Connecting;
-    GLOBAL_ACTIVE.fetch_add(1, Ordering::Relaxed);
 
     // 清除 URL 列表中的空格，过滤空 URL
     let urls: Vec<String> = file
@@ -180,7 +163,6 @@ pub async fn download_file(
         .collect();
 
     if urls.is_empty() {
-        GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
         file.mark_failed("未提供可用的下载地址".to_string());
         return Err("未提供可用的下载地址".to_string());
     }
@@ -193,7 +175,6 @@ pub async fn download_file(
         // 每个源最多重试 3 次 (参照 PCL-CE: 4次总共 = 1次初始 + 3次重试)
         for retry in 0u32..4 {
             if is_cancelled() {
-                GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
                 file.state = DownloadState::Interrupted;
                 return Err("已取消".to_string());
             }
@@ -223,19 +204,18 @@ pub async fn download_file(
                             file.file_name(),
                             err
                         );
-                        cleanup_temp(&file.local_path);
+                        cleanup_temp(&file.local_path).await;
                         last_error = format!("校验失败: {}", err);
                         continue; // 尝试下一个 URL
                     }
 
                     file.mark_finished();
-                    GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
                     eprintln!("[DL] 成功: {} ({} bytes)", file.file_name(), size);
                     return Ok(());
                 }
                 Err(e) => {
                     eprintln!("[DL] 失败 (重试 {}/3): {}", retry, e);
-                    cleanup_temp(&file.local_path);
+                    cleanup_temp(&file.local_path).await;
                     last_error = e;
 
                     if retry < 3 {
@@ -248,7 +228,6 @@ pub async fn download_file(
         }
     }
 
-    GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
     file.mark_failed(last_error.clone());
     Err(format!("{}: 所有下载源均不可用: {}", file.file_name(), last_error))
 }
@@ -267,6 +246,7 @@ async fn download_single(
 
     let resp = client
         .get(url)
+        .timeout(Duration::from_secs(600))
         .send()
         .await
         .map_err(|e| format!("请求失败: {}", e))?;
@@ -311,8 +291,6 @@ async fn download_single(
             } else {
                 0
             };
-            GLOBAL_SPEED.store(speed, Ordering::Relaxed);
-
             let percent = if total > 0 {
                 ((downloaded as f64 / total as f64) * 100.0).min(99.0) as u32
             } else {
@@ -375,12 +353,12 @@ async fn download_single(
 }
 
 /// 清理临时文件
-fn cleanup_temp(path: &PathBuf) {
+async fn cleanup_temp(path: &PathBuf) {
     let temp_path = path.with_extension("dlpart");
     for _ in 0..5 {
         match std::fs::remove_file(&temp_path) {
             Ok(_) => break,
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
 }
@@ -543,10 +521,9 @@ async fn download_single_with_batch(
             .map_err(|e| format!("无法创建目录 {}: {}", parent.display(), e))?;
     }
 
-    cleanup_temp(&file.local_path);
+    cleanup_temp(&file.local_path).await;
 
     file.state = DownloadState::Connecting;
-    GLOBAL_ACTIVE.fetch_add(1, Ordering::Relaxed);
 
     let urls: Vec<String> = file.urls.iter()
         .map(|u| u.trim().to_string())
@@ -554,7 +531,6 @@ async fn download_single_with_batch(
         .collect();
 
     if urls.is_empty() {
-        GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
         file.mark_failed("未提供可用的下载地址".to_string());
         return Err("未提供可用的下载地址".to_string());
     }
@@ -564,7 +540,6 @@ async fn download_single_with_batch(
     for url in &urls {
         for retry in 0u32..4 {
             if is_cancelled() {
-                GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
                 file.state = DownloadState::Interrupted;
                 return Err("已取消".to_string());
             }
@@ -581,18 +556,17 @@ async fn download_single_with_batch(
 
                     if let Some(err) = file.check.check(&file.local_path) {
                         eprintln!("[DL] 校验失败: {} ({})", file.file_name(), err);
-                        cleanup_temp(&file.local_path);
+                        cleanup_temp(&file.local_path).await;
                         last_error = format!("校验失败: {}", err);
                         continue;
                     }
 
                     file.mark_finished();
-                    GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
                     return Ok(size);
                 }
                 Err(e) => {
                     eprintln!("[DL] 失败 (重试 {}/3): {}", retry, e);
-                    cleanup_temp(&file.local_path);
+                    cleanup_temp(&file.local_path).await;
                     last_error = e;
                     if retry < 3 {
                         let delay = 300 + retry as u64 * 300;
@@ -603,7 +577,6 @@ async fn download_single_with_batch(
         }
     }
 
-    GLOBAL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
     file.mark_failed(last_error.clone());
     Err(format!("{}: 所有下载源均不可用: {}", file.file_name(), last_error))
 }
@@ -619,7 +592,9 @@ async fn download_single_with_batch_progress(
 ) -> Result<u64, String> {
     let client = build_http_client(Duration::from_secs(600))?;
 
-    let resp = client.get(url).send().await
+    let resp = client.get(url)
+        .timeout(Duration::from_secs(600))
+        .send().await
         .map_err(|e| format!("请求失败: {}", e))?;
 
     if !resp.status().is_success() {

@@ -640,15 +640,15 @@ body{margin:0;padding:0;overflow:hidden;user-select:none;-webkit-user-select:non
    PAGE TRANSITIONS — fade + slide
    ============================================================ */
 
-.page-enter-active{transition:opacity .18s ease,transform .18s ease}
-.page-leave-active{transition:opacity .12s ease,transform .12s ease}
-.page-enter-from{opacity:0;transform:translateX(18px)}
-.page-leave-to{opacity:0;transform:translateX(-12px)}
+.page-enter-active{transition:opacity .10s ease,transform .10s ease}
+.page-leave-active{transition:opacity .08s ease,transform .08s ease}
+.page-enter-from{opacity:0;transform:translateX(10px)}
+.page-leave-to{opacity:0;transform:translateX(-6px)}
 
-.dl-view-enter-active{transition:opacity .15s ease,transform .15s ease}
-.dl-view-leave-active{transition:opacity .1s ease,transform .1s ease}
-.dl-view-enter-from{opacity:0;transform:translateY(10px)}
-.dl-view-leave-to{opacity:0;transform:translateY(-6px)}
+.dl-view-enter-active{transition:opacity .08s ease,transform .08s ease}
+.dl-view-leave-active{transition:opacity .06s ease,transform .06s ease}
+.dl-view-enter-from{opacity:0;transform:translateY(6px)}
+.dl-view-leave-to{opacity:0;transform:translateY(-4px)}
 
 .modal-enter-active{transition:opacity .15s ease}
 .modal-leave-active{transition:opacity .12s ease}

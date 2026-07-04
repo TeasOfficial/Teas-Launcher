@@ -2,7 +2,12 @@
 //! 下载引擎已移至 download/ 模块
 
 use crate::config::config_read;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// 全局 HTTP 客户端缓存 — 避免每次请求重新创建 reqwest::Client
+static CLIENT_CACHE: Lazy<Mutex<Option<reqwest::Client>>> = Lazy::new(|| Mutex::new(None));
 
 static CANCEL_DOWNLOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -41,7 +46,18 @@ pub(crate) fn apply_source(url: &str, source: &str) -> String {
 }
 
 /// 从用户配置读取代理设置，创建 reqwest 客户端
+///
+/// 内部缓存全局 Client 实例，后续调用直接返回克隆（clone 是廉价的内部 Arc）
 pub(crate) fn build_http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    // 快速路径: 缓存命中
+    {
+        let cache = CLIENT_CACHE.lock().unwrap();
+        if let Some(client) = cache.as_ref() {
+            return Ok(client.clone());
+        }
+    }
+
+    // 慢速路径: 首次创建
     let cfg: serde_json::Value =
         config_read("user".to_string()).unwrap_or(serde_json::json!({}));
     let mut builder = reqwest::Client::builder()
@@ -78,5 +94,9 @@ pub(crate) fn build_http_client(timeout: Duration) -> Result<reqwest::Client, St
         }
     }
 
-    builder.build().map_err(|e| e.to_string())
+    let client = builder.build().map_err(|e| e.to_string())?;
+
+    // 缓存全局 Client
+    *CLIENT_CACHE.lock().unwrap() = Some(client.clone());
+    Ok(client)
 }

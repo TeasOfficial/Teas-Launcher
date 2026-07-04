@@ -320,7 +320,16 @@ pub(crate) async fn launch_instance(
     let version = resolve_version(&ctx.dot_minecraft, &ctx.instance_name)?;
 
     // ── 7. 解压 Natives (PCL-style) ──────────────
-    let natives_dir = prepare_natives(&ctx, &version)?;
+    // ★ 使用 spawn_blocking 避免同步 ZIP 解压阻塞 tokio 工作线程
+    let natives_dir = {
+        let ctx_clone = ctx.clone();
+        let version_clone = version.clone();
+        tokio::task::spawn_blocking(move || {
+            prepare_natives(&ctx_clone, &version_clone)
+        })
+        .await
+        .map_err(|e| format!("Natives 解压线程异常: {}", e))??
+    };
 
     // ── 8. 构建启动参数 (返回 Vec<String>) ────────
     let flat_args = build_flat_args(&ctx, &version, &natives_dir)?;

@@ -228,7 +228,23 @@ pub(crate) async fn fix_instance(
     Ok(format!("修复完成: {} 个文件已补全", fixed))
 }
 
+/// 将 Unix 时间戳转为相对时间字符串
+fn format_last_played(mtime_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let diff = now.saturating_sub(mtime_secs);
+    if diff < 60 { "刚刚".into() }
+    else if diff < 3600 { format!("{} 分钟前", diff / 60) }
+    else if diff < 86400 { format!("{} 小时前", diff / 3600) }
+    else { format!("{} 天前", diff / 86400) }
+}
+
 /// 列出所有实例
+///
+/// 使用 `.teas/instance_index.json` 持久化缓存扫描结果。
+/// 仅对目录 mtime 发生变化的实例重新扫描，其余从缓存读取。
 #[tauri::command]
 pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, String> {
     let base = std::path::Path::new(&mc_dir);
@@ -241,12 +257,55 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
     if !versions_dir.exists() {
         return Ok(Vec::new());
     }
+
+    // ── 读取缓存索引 ──
+    let index_path = crate::config::teas_dir()
+        .ok()
+        .map(|d| d.join("instance_index.json"));
+    let mut index: serde_json::Map<String, serde_json::Value> = index_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|v: serde_json::Value| v.as_object().cloned())
+        .unwrap_or_default();
+
     let mut instances = Vec::new();
+    let mut index_changed = false;
+
     if let Ok(entries) = std::fs::read_dir(&versions_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() { continue; }
             let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+            // 获取目录 mtime 作为缓存键
+            let mtime = path.metadata().ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .unwrap_or(0);
+
+            // ── 检查缓存 ──
+            if let Some(cached) = index.get(&name) {
+                if cached.get("_mtime").and_then(|v| v.as_u64()) == Some(mtime)
+                    && cached.get("version").is_some()
+                {
+                    // 缓存命中：从 _mtime 重新计算 lastPlayed（相对时间每天变化）
+                    let mut entry = cached.clone();
+                    let last_played = format_last_played(mtime);
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("lastPlayed".into(), serde_json::Value::String(last_played));
+                    }
+                    instances.push(entry);
+                    continue;
+                }
+            }
+
+            // ── 缓存未命中：完整扫描 ──
+            index_changed = true;
             let loader = detect_loader(&path).to_string();
             let mods = if let Ok(md) = std::fs::read_dir(path.join("mods")) {
                 md.filter(|e| {
@@ -276,17 +335,45 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
                 .unwrap_or_else(|| "从未".to_string());
             let mc_version = detect_mc_version(&path, &name)
                 .unwrap_or_else(|| name.clone());
-            instances.push(serde_json::json!({
+
+            let entry = serde_json::json!({
                 "name": name,
                 "version": mc_version,
                 "mods": mods,
                 "loader": loader == "Vanilla",
                 "loaderName": &loader,
                 "lastPlayed": last_played,
-                "active": instances.is_empty()
-            }));
+                "active": instances.is_empty(),
+                "_mtime": mtime,
+            });
+
+            index.insert(name, entry.clone());
+            instances.push(entry);
         }
     }
+
+    // ── 清理缓存中已删除的实例 ──
+    let existing_names: Vec<&str> = instances.iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    let stale: Vec<String> = index.keys()
+        .filter(|k| !existing_names.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    if !stale.is_empty() {
+        index_changed = true;
+        for k in &stale { index.remove(k); }
+    }
+
+    // ── 写入更新后的缓存 ──
+    if index_changed {
+        if let Some(p) = &index_path {
+            if let Ok(json) = serde_json::to_string(&index) {
+                let _ = std::fs::write(p, &json);
+            }
+        }
+    }
+
     Ok(instances)
 }
 

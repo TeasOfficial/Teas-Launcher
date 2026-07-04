@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, ref, type Ref, onMounted, onUnmounted } from "vue";
+import { inject, ref, type Ref, onActivated, onDeactivated } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DownloadTask } from "../App.vue";
@@ -42,7 +42,9 @@ function toggleDetails(taskId: number) {
 
 let unlisten: UnlistenFn | null = null;
 
-onMounted(async () => {
+onActivated(async () => {
+  // ★ 激活时注册监听器
+  if (unlisten) { unlisten(); unlisten = null; } // 安全清理
   unlisten = await listen<{
     batch_id: number;
     batch_total: number;
@@ -155,8 +157,9 @@ onMounted(async () => {
   });
 });
 
-onUnmounted(() => {
-  if (unlisten) unlisten();
+onDeactivated(() => {
+  // ★ 离开页面时卸载监听器
+  if (unlisten) { unlisten(); unlisten = null; }
 });
 
 async function cancelTask(task: DownloadTask) {

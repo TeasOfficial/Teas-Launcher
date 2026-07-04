@@ -163,20 +163,20 @@ onMounted(async () => {
 
   try {
     const mcDir = await invoke<string>("get_minecraft_dir");
-    instances.value = await invoke<Instance[]>("list_instances", { mcDir });
-    // 恢复上次选中的实例
-    const cfg = await invoke<Record<string, any>>("config_read", { scope: "launcher" });
-    const saved = cfg.active_instance as string | undefined;
+    const [list, launcherCfg, userCfg] = await Promise.all([
+      invoke<Instance[]>("list_instances", { mcDir }),
+      invoke<Record<string, any>>("config_read", { scope: "launcher" }),
+      invoke<Record<string, any>>("config_read", { scope: "user" }),
+    ]);
+    instances.value = list;
+    const saved = launcherCfg.active_instance as string | undefined;
     if (saved) {
       instances.value = instances.value.map(i =>
         ({ ...i, active: i.name === saved })
       ) as Instance[];
     }
-  } catch { /* */ }
-  try {
-    const cfg = await invoke<Record<string, any>>("config_read", { scope: "user" });
-    if (cfg.accounts && Array.isArray(cfg.accounts)) {
-      accounts.value = cfg.accounts;
+    if (userCfg.accounts && Array.isArray(userCfg.accounts)) {
+      accounts.value = userCfg.accounts;
     }
   } catch { /* */ }
 
@@ -247,7 +247,9 @@ function navigate(page: string) {
     </Transition>
     <StatusBar />
     <Transition name="page" mode="out-in">
-      <component :is="pageComponent" :key="currentPage" @select-instance="selectAndGo" @navigate="navigate" />
+      <KeepAlive>
+        <component :is="pageComponent" :key="currentPage" @select-instance="selectAndGo" @navigate="navigate" />
+      </KeepAlive>
     </Transition>
 
     <!-- 拖放整合包浮层提示 -->

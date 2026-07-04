@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, inject, computed, onMounted, onUnmounted, type ComputedRef, type Ref } from "vue";
+import { ref, inject, computed, onActivated, onDeactivated, type ComputedRef, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { Instance, Account } from "../App.vue";
 
@@ -23,59 +23,78 @@ const crashInfo = ref<{ reason: string; log_path: string; crash_dir?: string } |
 
 const cpuUsage = ref(0);
 const memUsage = ref(0);
-let statsTimer: number;
+let statsTimer: number | null = null;
+let runningTimer: number | null = null;
 
 const displayMemory = ref("4096 MB");
-const displayJava = ref("Java 21");
 
-onMounted(async () => {
-  try { isRunning.value = await invoke<boolean>("is_instance_running"); } catch { /* */ }
-  // 从配置读取内存和 Java 信息
-  try {
-    const cfg = await invoke<Record<string, any>>("config_read", { scope: "user" });
-    displayMemory.value = cfg.max_memory || "4096 MB";
-    // 用 scan_java 获取准确的 Java 版本
-    const javaPath: string = cfg.java_path || "javaw";
-    const javaList = await invoke<{ path: string; version: string }[]>("scan_java");
-    const norm = (p: string) => p.toLowerCase().replace(/\\/g, '/');
-    const match = javaList.find(j => norm(j.path) === norm(javaPath));
-    if (match) {
-      displayJava.value = `Java ${match.version}`;
-    } else {
-      // 回退：从路径推测
-      const pathMatch = javaPath.match(/[Jj]ava[^/\\]*[/\\]?(\d+)/);
-      displayJava.value = pathMatch ? `Java ${pathMatch[1]}` : `Java ${javaList[0]?.version || "?"}`;
-    }
-  } catch { /* */ }
+// 首次初始化标志（onActivated 在首次挂载时也会触发）
+let initialized = false;
 
-  const poll = async () => {
+onActivated(async () => {
+  if (!initialized) {
+    // 首次挂载: 加载初始数据
+    initialized = true;
+    let running = false;
     try {
-      const [cpu, mem] = await invoke<[number, number]>("get_system_stats");
-      cpuUsage.value = Math.round(cpu);
-      memUsage.value = Math.round(mem);
-    } catch (_) { /* ignore */ }
-  };
-  poll();
-  statsTimer = window.setInterval(poll, 2000);
-  setInterval(async () => {
-    if (isRunning.value) {
-      try {
-        const still = await invoke<boolean>("is_instance_running");
-        if (!still) {
-          // 进程退出了，检查崩溃
-          isRunning.value = false;
-          try {
-            const mcDir = await invoke<string>("get_minecraft_dir");
-            const crash = await invoke<any>("check_crash", { mcDir, instanceName: activeInstance.value.name });
-            if (crash) crashInfo.value = crash;
-          } catch { /* */ }
-        }
-      } catch { /* */ }
-    }
-  }, 5000);
+      const [isRunningResult, cfg] = await Promise.all([
+        invoke<boolean>("is_instance_running").catch(() => false),
+        invoke<Record<string, any>>("config_read", { scope: "user" }).catch(() => null),
+      ]);
+      running = isRunningResult;
+      if (cfg) {
+        displayMemory.value = cfg.max_memory || "4096 MB";
+      }
+    } catch { /* */ }
+    isRunning.value = running;
+  }
+
+  // ★ 启动轮询（每次激活都启动）
+  startPolling();
 });
 
-onUnmounted(() => clearInterval(statsTimer));
+onDeactivated(() => {
+  // ★ 离开页面时停止所有轮询
+  stopPolling();
+});
+
+function startPolling() {
+  stopPolling(); // 防止重复启动
+  pollStats();
+  pollRunning();
+}
+
+function stopPolling() {
+  if (statsTimer !== null) { clearTimeout(statsTimer); statsTimer = null; }
+  if (runningTimer !== null) { clearTimeout(runningTimer); runningTimer = null; }
+}
+
+async function pollStats() {
+  try {
+    const [cpu, mem] = await invoke<[number, number]>("get_system_stats");
+    cpuUsage.value = Math.round(cpu);
+    memUsage.value = Math.round(mem);
+  } catch (_) { /* ignore */ }
+  // ★ 递归 setTimeout: 等当前调用完成后再等 2 秒
+  statsTimer = window.setTimeout(pollStats, 2000);
+}
+
+async function pollRunning() {
+  if (isRunning.value) {
+    try {
+      const still = await invoke<boolean>("is_instance_running");
+      if (!still) {
+        isRunning.value = false;
+        try {
+          const mcDir = await invoke<string>("get_minecraft_dir");
+          const crash = await invoke<any>("check_crash", { mcDir, instanceName: activeInstance.value.name });
+          if (crash) crashInfo.value = crash;
+        } catch { /* */ }
+      }
+    } catch { /* */ }
+  }
+  runningTimer = window.setTimeout(pollRunning, 5000);
+}
 
 async function launch() {
   if (!activeAccount?.value) { showNoAccount.value = true; return; }
@@ -210,8 +229,6 @@ async function kill() {
               <span class="li-item">{{ activeInstance.loaderName.toUpperCase() }}</span>
               <span class="li-sep">//</span>
               <span class="li-item">{{ displayMemory }}</span>
-              <span class="li-sep">//</span>
-              <span class="li-item">{{ displayJava }}</span>
             </div>
           </div>
         </div>

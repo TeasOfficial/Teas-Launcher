@@ -31,14 +31,14 @@ mod modpack;
 pub(crate) const BUILD: u32 = 75;
 
 pub fn run() {
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_all();
     let _ = config::teas_dir();
+
+    let state = system::SystemState::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(std::sync::Mutex::new(sys))
+        .manage(std::sync::Mutex::new(state))
         .invoke_handler(tauri::generate_handler![
             // ── 实例管理 ──
             instance::fix_instance,

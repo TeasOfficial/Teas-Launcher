@@ -4,8 +4,55 @@ use crate::config::teas_dir;
 use crate::http::build_http_client;
 use crate::BUILD;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::System;
+
+// ── SystemState：CPU 刷新节流 ────────────────────────────────
+
+/// 包装 sysinfo::System，提供 CPU/内存信息 1 秒缓存避免频繁刷新
+pub struct SystemState {
+    pub sys: System,
+    last_cpu_refresh: Instant,
+    cpu_cache: (f32, f32),
+}
+
+impl SystemState {
+    pub fn new() -> Self {
+        Self {
+            sys: System::new(),
+            last_cpu_refresh: Instant::now(),
+            cpu_cache: (0.0, 0.0),
+        }
+    }
+
+    /// 获取 CPU 和内存使用率（1 秒内缓存）
+    pub fn get_stats(&mut self) -> (f32, f32) {
+        let elapsed = self.last_cpu_refresh.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            self.sys.refresh_cpu_all();
+            self.sys.refresh_memory();
+            let cpu = self.sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
+                / self.sys.cpus().len() as f32;
+            let mem = self.sys.used_memory() as f32 / self.sys.total_memory() as f32 * 100.0;
+            self.cpu_cache = (cpu, mem);
+            self.last_cpu_refresh = Instant::now();
+        }
+        self.cpu_cache
+    }
+
+    /// 获取内存信息（MB）
+    pub fn get_memory_info(&mut self) -> (u64, u64) {
+        self.sys.refresh_memory();
+        let total = self.sys.total_memory() / 1024 / 1024;
+        let free = self.sys.free_memory() / 1024 / 1024;
+        (total, free)
+    }
+}
+
+/// Java 扫描结果持久化缓存文件路径
+fn java_cache_path() -> Option<std::path::PathBuf> {
+    crate::config::teas_dir().ok().map(|d| d.join("java_scan.json"))
+}
 
 #[tauri::command]
 pub(crate) fn get_version() -> String {
@@ -43,13 +90,9 @@ pub(crate) fn get_teas_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub(crate) fn get_system_stats(sys: tauri::State<'_, Mutex<System>>) -> (f32, f32) {
-    let mut s = sys.lock().unwrap();
-    s.refresh_cpu_all();
-    s.refresh_memory();
-    let cpu = s.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / s.cpus().len() as f32;
-    let mem = s.used_memory() as f32 / s.total_memory() as f32 * 100.0;
-    (cpu, mem)
+pub(crate) fn get_system_stats(state: tauri::State<'_, Mutex<SystemState>>) -> (f32, f32) {
+    let mut s = state.lock().unwrap();
+    s.get_stats()
 }
 
 #[tauri::command]
@@ -153,8 +196,25 @@ pub(crate) fn detect_system_proxy() -> Result<serde_json::Value, String> {
 }
 
 /// 扫描系统中的 Java 安装
+///
+/// 首次启动扫描后结果持久化到 `.teas/java_scan.json`，
+/// 后续启动直接读取缓存。用户可在设置中手动触发重新扫描。
 #[tauri::command]
 pub(crate) fn scan_java() -> Vec<serde_json::Value> {
+    // ── 1. 检查文件缓存 ──
+    if let Some(cache_path) = java_cache_path() {
+        if cache_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&cache_path) {
+                if let Ok(cached) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
+                    if !cached.is_empty() {
+                        return cached;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 2. 完整扫描（仅首次启动或缓存失效时执行） ──
     let mut paths = Vec::new();
     for root in &[
         "C:\\Program Files\\Java",
@@ -205,18 +265,22 @@ pub(crate) fn scan_java() -> Vec<serde_json::Value> {
             .unwrap_or_else(|| "未知".to_string());
         result.push(serde_json::json!({"path": java_path, "version": version}));
     }
+
+    // ── 3. 写入持久化缓存 ──
+    if let Some(cache_path) = java_cache_path() {
+        if let Ok(json) = serde_json::to_string(&result) {
+            let _ = std::fs::write(&cache_path, &json);
+        }
+    }
+
     result
 }
 
 /// 获取系统内存信息 (MB)
 #[tauri::command]
-pub fn get_memory_info(sys: tauri::State<'_, Mutex<System>>) -> (u64, u64) {
-    let s = sys.lock().unwrap();
-    // sysinfo 0.33: total_memory / available_memory 已废弃，用 System 方法
-    let total = s.total_memory() / 1024 / 1024; // bytes → MB
-    // 无直接 available，用 free 近似
-    let free = s.free_memory() / 1024 / 1024;
-    (total, free)
+pub fn get_memory_info(state: tauri::State<'_, Mutex<SystemState>>) -> (u64, u64) {
+    let mut s = state.lock().unwrap();
+    s.get_memory_info()
 }
 
 /// 自动计算推荐内存分配 (MB)

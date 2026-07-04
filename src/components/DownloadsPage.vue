@@ -325,6 +325,15 @@ const searchOffset = ref(0);
 const currentBbsmcType = ref("");
 const searchLimit = 20;
 
+let searchDebounce: number | null = null;
+
+function debouncedSearch() {
+  if (searchDebounce !== null) clearTimeout(searchDebounce);
+  searchDebounce = window.setTimeout(() => {
+    doSearch(0);
+  }, 400); // 400ms debounce
+}
+
 const sortOptions = [
   { value: "relevance", zh: "相关性" },
   { value: "downloads", zh: "下载量" },
@@ -569,7 +578,7 @@ function goBack() {
       <span class="page-line"></span>
     </div>
 
-    <Transition name="dl-view" mode="out-in">
+    <Transition name="dl-view">
       <!-- 主分类 -->
       <div v-if="active === 'main'" key="main" class="dl-main-grid">
         <div class="dl-main-card" v-for="cat in categories" :key="cat.id" @click="cat.bbsmcType ? openSearch({ id: cat.id, zh: cat.zh, en: cat.en, bbsmcType: cat.bbsmcType }) : (active = cat.id)">
@@ -624,8 +633,8 @@ function goBack() {
           <button :class="['toggle-btn', { active: modSource === 'CurseForge' }]" @click="modSource = 'CurseForge'; doSearch(0)">CurseForge</button>
         </div>
         <div class="dl-search-bar">
-          <input class="dl-search-input" v-model="searchQuery" :placeholder="`搜索${searchType}`" @keyup.enter="doSearch()" />
-          <button class="dl-install-btn" style="flex-shrink:0" @click="doSearch()" :disabled="searchLoading">
+          <input class="dl-search-input" v-model="searchQuery" :placeholder="`搜索${searchType}`" @keyup.enter="doSearch(0)" @input="debouncedSearch" />
+          <button class="dl-install-btn" style="flex-shrink:0" @click="() => { if (searchDebounce) clearTimeout(searchDebounce); doSearch(0); }" :disabled="searchLoading">
             <span class="bl-zh">{{ searchLoading ? '搜索中...' : '搜索' }}</span>
           </button>
         </div>
