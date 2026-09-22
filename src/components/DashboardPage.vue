@@ -2,12 +2,24 @@
 import { ref, inject, computed, onActivated, onDeactivated, type ComputedRef, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { Instance, Account } from "../App.vue";
+import { gameSourceParam } from "../utils/source";
 
 const activeInstance = inject<ComputedRef<Instance>>("activeInstance")!;
 const activeAccount = inject<ComputedRef<Account | undefined>>("activeAccount")!;
 
 const playerName = computed(() => activeAccount?.value?.statusZh ?? "---");
-const playerId = computed(() => activeAccount?.value?.nameZh ?? "未登录");
+/**
+ * 账户 UUID。Account 的 nameZh 存的是账户**类型**名（"离线账户"/"外置验证"），
+ * 不是 UUID —— 之前这里直接用了 nameZh，于是"UUID"一栏显示的其实是账户类型。
+ */
+const playerUuid = computed(() => activeAccount?.value?.uuid ?? "");
+/** 认证状态：离线账户只是本地标识，不该标成"已认证" */
+const authState = computed(() => {
+  const a = activeAccount?.value;
+  if (!a) return { zh: "未登录", en: "NOT AUTHENTICATED" };
+  if (a.type === "offline") return { zh: "离线模式", en: "OFFLINE MODE" };
+  return { zh: "已认证", en: "AUTHENTICATED" };
+});
 
 const emit = defineEmits<{ "navigate": [page: string] }>();
 
@@ -28,26 +40,19 @@ let runningTimer: number | null = null;
 
 const displayMemory = ref("4096 MB");
 
-// 首次初始化标志（onActivated 在首次挂载时也会触发）
-let initialized = false;
-
 onActivated(async () => {
-  if (!initialized) {
-    // 首次挂载: 加载初始数据
-    initialized = true;
-    let running = false;
-    try {
-      const [isRunningResult, cfg] = await Promise.all([
-        invoke<boolean>("is_instance_running").catch(() => false),
-        invoke<Record<string, any>>("config_read", { scope: "user" }).catch(() => null),
-      ]);
-      running = isRunningResult;
-      if (cfg) {
-        displayMemory.value = cfg.max_memory || "4096 MB";
-      }
-    } catch { /* */ }
+  // 每次激活都刷新：内存可能在「设置」页刚被改过，运行状态也可能在其他
+  // 页面发生变化。此前只在首次挂载读取一次，导致改了内存后仪表盘仍显示旧值。
+  try {
+    const [running, cfg] = await Promise.all([
+      invoke<boolean>("is_instance_running").catch(() => false),
+      invoke<Record<string, any>>("config_read", { scope: "user" }).catch(() => null),
+    ]);
     isRunning.value = running;
-  }
+    if (cfg) {
+      displayMemory.value = cfg.max_memory || "4096 MB";
+    }
+  } catch { /* */ }
 
   // ★ 启动轮询（每次激活都启动）
   startPolling();
@@ -109,7 +114,8 @@ async function launch() {
     const cfg = await invoke<Record<string, any>>("config_read", { scope: "user" });
     launchStatus.value = "检查完整性...";
     updateDlTask(taskId, "检查文件完整性");
-    await invoke("fix_instance", { mcDir, instanceName: instName, source: "MCIMirror" });
+    // 用用户配置的游戏源，不要把 mod 源或写死的值传进来
+    await invoke("fix_instance", { mcDir, instanceName: instName, source: gameSourceParam(cfg) });
 
     launchStatus.value = "启动中...";
     updateDlTask(taskId, "正在启动游戏");
@@ -174,8 +180,8 @@ async function kill() {
           <div>
             <span class="pi-label">UUID</span>
             <span class="pi-val">
-              <span class="bl-zh">{{ playerId }}</span>
-              <span class="bl-en">{{ playerId === '未登录' ? 'NOT AUTHENTICATED' : 'AUTHENTICATED' }}</span>
+              <span class="bl-zh">{{ authState.zh }} · {{ playerUuid || '——' }}</span>
+              <span class="bl-en">{{ authState.en }}</span>
             </span>
           </div>
           <button class="switch-operator-btn" @click="emit('navigate', 'accounts')">

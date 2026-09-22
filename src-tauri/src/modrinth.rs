@@ -20,8 +20,13 @@ pub(crate) async fn search_bbsmc(
     let client = build_http_client(Duration::from_secs(10))?;
 
     let mut facets = Vec::new();
-    if !project_type.is_empty() {
-        facets.push(format!("[\"project_type:{}\"]", project_type));
+    // Modrinth 合法的 project_type 只有 mod / modpack / resourcepack / shader /
+    // datapack / plugin。前端"地图"分类用的是 "map"，直接下发会恒定返回 0 条，
+    // 这里显式映射到世界生成分类。
+    match project_type.as_str() {
+        "" => {}
+        "map" => facets.push("[\"categories:worldgen\"]".to_string()),
+        t => facets.push(format!("[\"project_type:{}\"]", t)),
     }
     if !version.is_empty() {
         facets.push(format!("[\"versions:{}\"]", version));
@@ -43,8 +48,32 @@ pub(crate) async fn search_bbsmc(
         url.push_str(&format!("&query={}", urlencoding::encode(&query)));
     }
 
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    log::debug!("[search] GET {}", url);
+
+    let resp = client.get(&url).send().await.map_err(|e| {
+        log::error!("[search] 请求失败: {}", e);
+        e.to_string()
+    })?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        // 直接 parse body 会把 4xx/5xx 的 HTML 错误页当成 JSON 解析失败，
+        // 报出难以理解的错误，这里先判状态码
+        log::error!("[search] HTTP {} — {}", status.as_u16(), &text[..text.len().min(200)]);
+        return Err(format!("搜索接口返回 HTTP {} ({})", status.as_u16(), source));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        log::error!("[search] 响应解析失败: {}", e);
+        format!("搜索响应解析失败: {}", e)
+    })?;
+
+    log::debug!(
+        "[search] {} 命中 {} 条 ({} / {})",
+        query, json["total_hits"].as_u64().unwrap_or(0),
+        project_type, version
+    );
     Ok(json)
 }
 

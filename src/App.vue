@@ -68,6 +68,8 @@ export interface Account {
   statusEn: string;
   active: boolean;
   type: string;
+  /** 离线账户的 UUID（MD5("OfflinePlayer:"+name)，由后端 offline_uuid 计算） */
+  uuid?: string;
 }
 
 const instances = ref<Instance[]>([]);
@@ -169,14 +171,26 @@ onMounted(async () => {
       invoke<Record<string, any>>("config_read", { scope: "user" }),
     ]);
     instances.value = list;
-    const saved = launcherCfg.active_instance as string | undefined;
-    if (saved) {
-      instances.value = instances.value.map(i =>
-        ({ ...i, active: i.name === saved })
-      ) as Instance[];
-    }
+    // active 由后端按 .teas/tc.ini 的 active_instance 计算，这里不再重复映射，
+    // 避免两个真相来源（先前客户端的重映射与后端的枚举顺序经常不一致）
     if (userCfg.accounts && Array.isArray(userCfg.accounts)) {
       accounts.value = userCfg.accounts;
+      // 迁移: 旧版本创建的离线账户没有 uuid 字段，补算一次并回写，
+      // 否则仪表盘的 UUID 一栏永远只显示占位符
+      let changed = false;
+      for (const a of accounts.value as Account[]) {
+        if (a.type === "offline" && !a.uuid && a.statusZh) {
+          try {
+            a.uuid = await invoke<string>("offline_uuid", { playerName: a.statusZh });
+            changed = true;
+          } catch { /* 保持无 uuid */ }
+        }
+      }
+      if (changed) {
+        try {
+          await invoke("config_write", { scope: "user", key: "accounts", value: accounts.value });
+        } catch { /* */ }
+      }
     }
   } catch { /* */ }
 

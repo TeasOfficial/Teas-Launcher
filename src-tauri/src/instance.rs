@@ -1,13 +1,35 @@
 //! 实例管理：解析版本、列表、删除、修复
 
-use crate::utils::{detect_loader, read_json_field};
+use crate::utils::detect_loader;
 use tauri::Emitter;
 
 /// HMCL-style: 解析版本 JSON 并合并 inheritsFrom 父版本的数据
+///
+/// 合并规则（子优先）:
+/// - libraries: 父在前子在后
+/// - arguments.jvm / arguments.game: 父在前子在后（子 JSON 常为差异式，只含自身参数）
+/// - minecraftArguments / mainClass / assets / assetIndex / jar / javaVersion: 子为空时用父的
 pub(crate) fn resolve_version(
     dot_minecraft: &std::path::Path,
     instance_name: &str,
 ) -> Result<serde_json::Value, String> {
+    resolve_version_impl(dot_minecraft, instance_name, &mut std::collections::HashSet::new(), 0)
+}
+
+fn resolve_version_impl(
+    dot_minecraft: &std::path::Path,
+    instance_name: &str,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u32,
+) -> Result<serde_json::Value, String> {
+    // 环检测 + 深度上限（防止 inheritsFrom 循环导致栈溢出）
+    if depth > 10 {
+        return Err(format!("inheritsFrom 链过深 (>10): {}", instance_name));
+    }
+    if !visited.insert(instance_name.to_string()) {
+        return Err(format!("检测到循环 inheritsFrom: {}", instance_name));
+    }
+
     let json_path = dot_minecraft
         .join("versions")
         .join(instance_name)
@@ -30,36 +52,54 @@ pub(crate) fn resolve_version(
     // 递归解析 inheritsFrom
     if let Some(parent_name) = version["inheritsFrom"].as_str().map(|s| s.to_string()) {
         if parent_name != instance_name {
-            let parent = resolve_version(dot_minecraft, &parent_name)?;
+            let parent = resolve_version_impl(dot_minecraft, &parent_name, visited, depth + 1)?;
+
+            // libraries: 父在前子在后
             if let Some(parent_libs) = parent["libraries"].as_array() {
                 let cur_libs = version["libraries"].as_array().cloned().unwrap_or_default();
                 let mut merged: Vec<serde_json::Value> = parent_libs.iter().cloned().collect();
                 merged.extend(cur_libs);
                 version["libraries"] = serde_json::Value::Array(merged);
             }
-            if version["mainClass"].is_null() {
-                version["mainClass"] = parent["mainClass"].clone();
+
+            // mainClass / assets / assetIndex / jar / javaVersion: 子优先，为空则继承父
+            for field in ["mainClass", "assets", "assetIndex", "jar", "javaVersion"] {
+                if version[field].is_null() && !parent[field].is_null() {
+                    version[field] = parent[field].clone();
+                }
             }
-            if version["assets"].is_null() {
-                version["assets"] = parent["assets"].clone();
+
+            // minecraftArguments（旧版格式）: 子为空则继承父
+            if version["minecraftArguments"].is_null() && !parent["minecraftArguments"].is_null() {
+                version["minecraftArguments"] = parent["minecraftArguments"].clone();
             }
-            if version["assetIndex"].is_null() && !parent["assetIndex"].is_null() {
-                version["assetIndex"] = parent["assetIndex"].clone();
-            }
-            if let Some(parent_args) = parent["arguments"].as_object() {
-                if version["arguments"].is_null() {
-                    version["arguments"] = parent["arguments"].clone();
-                } else if let Some(cur_args) = version["arguments"].as_object_mut() {
-                    let cur_game = cur_args.get("game").cloned().unwrap_or(serde_json::Value::Array(vec![]));
-                    let parent_game = parent_args.get("game").cloned().unwrap_or(serde_json::Value::Array(vec![]));
-                    if let (Some(cur_arr), Some(parent_arr)) = (cur_game.as_array(), parent_game.as_array()) {
-                        let mut merged = parent_arr.clone();
-                        merged.extend(cur_arr.clone());
-                        cur_args.insert("game".to_string(), serde_json::Value::Array(merged));
-                    } else if cur_game.is_null() {
-                        cur_args.insert("game".to_string(), parent_game);
+
+            // arguments: jvm + game 均合并（父在前子在后）
+            let parent_args = parent["arguments"].as_object().cloned();
+            let cur_args = version["arguments"].as_object_mut();
+            match (parent_args, cur_args) {
+                (Some(pargs), Some(cargs)) => {
+                    for key in ["jvm", "game"] {
+                        let cur = cargs.get(key).cloned().unwrap_or(serde_json::Value::Array(vec![]));
+                        let par = pargs.get(key).cloned().unwrap_or(serde_json::Value::Array(vec![]));
+                        match (cur.as_array(), par.as_array()) {
+                            (Some(cur_arr), Some(par_arr)) => {
+                                let mut merged = par_arr.clone();
+                                merged.extend(cur_arr.clone());
+                                cargs.insert(key.to_string(), serde_json::Value::Array(merged));
+                            }
+                            // 子参数缺失/畸形（非数组）→ 直接继承父的
+                            (_, Some(par_arr)) => {
+                                cargs.insert(key.to_string(), serde_json::Value::Array(par_arr.clone()));
+                            }
+                            _ => {}
+                        }
                     }
                 }
+                (Some(pargs), None) => {
+                    version["arguments"] = serde_json::Value::Object(pargs);
+                }
+                _ => {}
             }
         }
     }
@@ -191,6 +231,9 @@ pub(crate) async fn fix_instance(
     };
     let prefer_official = source == "Mojang";
 
+    // ★ 修复取消粘滞: 之前用户取消过下载会导致 CANCEL_DOWNLOAD 永久为 true
+    crate::http::reset_cancel();
+
     // 解析版本 JSON
     let version = resolve_version(&dot_minecraft, &instance_name)?;
     let mut fixed = 0u32;
@@ -230,6 +273,10 @@ pub(crate) async fn fix_instance(
 
 /// 将 Unix 时间戳转为相对时间字符串
 fn format_last_played(mtime_secs: u64) -> String {
+    // mtime 读取失败时上游填 0，不能当成 1970 年算出"两万天前"
+    if mtime_secs == 0 {
+        return "从未".into();
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -272,11 +319,30 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
     let mut instances = Vec::new();
     let mut index_changed = false;
 
+    // 用户当前选中的实例（存在 .teas/tc.ini 的 launcher scope）。
+    // 索引里不再持久化 active —— 那个值只是"首次扫描时排在第一个"，与用户选择无关。
+    let active_instance = crate::config::config_read("launcher".to_string())
+        .ok()
+        .and_then(|c| {
+            c.get("active_instance")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+
     if let Ok(entries) = std::fs::read_dir(&versions_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() { continue; }
             let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+            // versions/ 下的任意子目录都会被扫到，但只有带同名 <name>.json 的才是
+            // 可启动的版本实例（launch 的 pre_check 同样要求这个文件）。缺它的目录是
+            // 残留的游戏目录或半成品，列出来只会让用户点到必然失败的启动按钮。
+            if !path.join(format!("{}.json", name)).exists() {
+                log::debug!("[instance] 跳过无版本 JSON 的目录: {}", name);
+                continue;
+            }
 
             // 获取目录 mtime 作为缓存键
             let mtime = path.metadata().ok()
@@ -293,13 +359,35 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
                 if cached.get("_mtime").and_then(|v| v.as_u64()) == Some(mtime)
                     && cached.get("version").is_some()
                 {
-                    // 缓存命中：从 _mtime 重新计算 lastPlayed（相对时间每天变化）
+                    // 缓存命中：派生字段一律即时计算，避免随缓存僵化
+                    // - lastPlayed 是相对时间，存下来一天后就永久错误
+                    // - active 依赖用户当前选择，选择变了缓存不会跟着变
+                    // - loader 由 loaderName 派生（旧版本缓存里存的是反的）
                     let mut entry = cached.clone();
-                    let last_played = format_last_played(mtime);
                     if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("lastPlayed".into(), serde_json::Value::String(last_played));
+                        obj.insert(
+                            "lastPlayed".into(),
+                            serde_json::Value::String(format_last_played(mtime)),
+                        );
+                        obj.insert("active".into(), serde_json::Value::Bool(name == active_instance));
+                        let has_loader = cached
+                            .get("loaderName")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s != "Vanilla")
+                            .unwrap_or(false);
+                        obj.insert("loader".into(), serde_json::Value::Bool(has_loader));
                     }
                     instances.push(entry);
+
+                    // 旧格式缓存里还留着 loader / lastPlayed / active 三个派生字段，
+                    // 它们会永远僵化在首次扫描时的值。这里顺手清掉，让文件收敛到干净 schema。
+                    if let Some(obj) = index.get_mut(&name).and_then(|v| v.as_object_mut()) {
+                        for k in ["loader", "lastPlayed", "active"] {
+                            if obj.remove(k).is_some() {
+                                index_changed = true;
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -318,37 +406,33 @@ pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, S
             } else {
                 0
             };
-            let last_played = path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    let diff = std::time::SystemTime::now()
-                        .duration_since(t)
-                        .unwrap_or_default()
-                        .as_secs();
-                    if diff < 60 { "刚刚".into() }
-                    else if diff < 3600 { format!("{} 分钟前", diff / 60) }
-                    else if diff < 86400 { format!("{} 小时前", diff / 3600) }
-                    else { format!("{} 天前", diff / 86400) }
-                })
-                .unwrap_or_else(|| "从未".to_string());
             let mc_version = detect_mc_version(&path, &name)
-                .unwrap_or_else(|| name.clone());
+                .unwrap_or_else(|| "未知".to_string());
 
-            let entry = serde_json::json!({
+            // 只有需要扫盘才能得到的字段才入库。lastPlayed / active 是派生值，
+            // 存下来会随缓存一起僵化（每天变化、随用户选择变化），loader 也能由
+            // loaderName 直接推出——这三个一律在返回时即时计算。
+            index.insert(
+                name.clone(),
+                serde_json::json!({
+                    "name": name,
+                    "version": mc_version,
+                    "mods": mods,
+                    "loaderName": &loader,
+                    "_mtime": mtime,
+                }),
+            );
+
+            instances.push(serde_json::json!({
                 "name": name,
                 "version": mc_version,
                 "mods": mods,
-                "loader": loader == "Vanilla",
+                "loader": loader != "Vanilla",
                 "loaderName": &loader,
-                "lastPlayed": last_played,
-                "active": instances.is_empty(),
+                "lastPlayed": format_last_played(mtime),
+                "active": name == active_instance,
                 "_mtime": mtime,
-            });
-
-            index.insert(name, entry.clone());
-            instances.push(entry);
+            }));
         }
     }
 

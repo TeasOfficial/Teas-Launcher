@@ -6,7 +6,6 @@ use crate::download::engine::download_file;
 use crate::download::model::{DownloadFile, FileChecker};
 use std::path::Path;
 
-#[allow(dead_code)]
 pub async fn install_cleanroom(
     app: &tauri::AppHandle,
     mc_dir: &Path,

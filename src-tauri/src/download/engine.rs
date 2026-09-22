@@ -21,7 +21,7 @@
 //!   "step": str,            // 人类可读的描述
 //! }
 
-use super::model::{DownloadFile, DownloadState, FileChecker};
+use super::model::{DownloadFile, DownloadState};
 use crate::config::config_read;
 use crate::http::{build_http_client, is_cancelled};
 use std::path::PathBuf;
@@ -37,8 +37,6 @@ pub struct DownloadResult {
     pub success: usize,
     pub failed: usize,
     pub skipped: usize, // 文件已存在且通过校验，跳过
-    #[allow(dead_code)]
-    pub errors: Vec<String>,
 }
 
 /// 批量下载进度追踪器 — 跨线程共享
@@ -137,7 +135,7 @@ pub async fn download_file(
                 file.downloaded = meta.len() as u64;
             }
             file.mark_finished();
-            eprintln!("[DL] 跳过 (已存在): {}", file.file_name());
+            log::debug!("[DL] 跳过 (已存在): {}", file.file_name());
             return Ok(());
         }
     }
@@ -170,7 +168,7 @@ pub async fn download_file(
     let mut last_error = String::new();
 
     for url in &urls {
-        eprintln!("[DL] 尝试: {} -> {}", url, file.local_path.display());
+        log::debug!("[DL] 尝试: {} -> {}", url, file.local_path.display());
 
         // 每个源最多重试 3 次 (参照 PCL-CE: 4次总共 = 1次初始 + 3次重试)
         for retry in 0u32..4 {
@@ -199,7 +197,7 @@ pub async fn download_file(
 
                     // 下载后校验
                     if let Some(err) = file.check.check(&file.local_path) {
-                        eprintln!(
+                        log::error!(
                             "[DL] 校验失败: {} ({})",
                             file.file_name(),
                             err
@@ -210,11 +208,11 @@ pub async fn download_file(
                     }
 
                     file.mark_finished();
-                    eprintln!("[DL] 成功: {} ({} bytes)", file.file_name(), size);
+                    log::debug!("[DL] 成功: {} ({} bytes)", file.file_name(), size);
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("[DL] 失败 (重试 {}/3): {}", retry, e);
+                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
                     cleanup_temp(&file.local_path).await;
                     last_error = e;
 
@@ -256,7 +254,7 @@ async fn download_single(
     }
 
     let total = resp.content_length().unwrap_or(0);
-    eprintln!("[DL] 响应: total={}, url={}", total, url);
+    log::debug!("[DL] 响应: total={}, url={}", total, url);
 
     // 流式下载 + 进度追踪
     use futures_util::StreamExt;
@@ -342,7 +340,7 @@ async fn download_single(
     } else {
         0
     };
-    eprintln!(
+    log::info!(
         "[DL] 单文件完成: {} bytes, {}s, {} B/s avg",
         downloaded,
         elapsed_total.as_secs_f64(),
@@ -376,7 +374,6 @@ pub async fn download_files_parallel(
     if total == 0 {
         return DownloadResult {
             total: 0, success: 0, failed: 0, skipped: 0,
-            errors: Vec::new(),
         };
     }
 
@@ -387,7 +384,7 @@ pub async fn download_files_parallel(
         .max(1)
         .min(64);
 
-    eprintln!("[DL] 批量下载 {} 个文件 ({} 线程)", total, dl_threads);
+    log::info!("[DL] 批量下载 {} 个文件 ({} 线程)", total, dl_threads);
 
     // ── 计算总大小 ──
     let total_bytes: u64 = files.iter()
@@ -463,20 +460,23 @@ pub async fn download_files_parallel(
                 &a, &mut df, false, &batch, &file_name,
             ).await;
 
+            let _done = batch.done_files.fetch_add(1, Ordering::Relaxed) + 1;
             match result {
                 Ok(bytes) => {
                     sc.fetch_add(1, Ordering::Relaxed);
                     batch.downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    batch.emit(&a, &file_name, 100, 0, file_size, file_size,
+                        &format!("完成 ({}/{})", _done, total));
                 }
                 Err(e) => {
                     fc.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("[DL] 批量-失败: {} ({})", file_name, e);
+                    log::warn!("[DL] 批量-失败: {} ({})", file_name, e);
+                    // 失败也要计入完成数，否则进度条会停在最后一个成功文件上；
+                    // 但必须用独立文案，避免前端把失败当成功显示
+                    batch.emit(&a, &file_name, 100, 0, file_size, file_size,
+                        &format!("失败 ({}/{}): {}", _done, total, e));
                 }
             }
-
-            let _done = batch.done_files.fetch_add(1, Ordering::Relaxed) + 1;
-            batch.emit(&a, &file_name, 100, 0, file_size, file_size,
-                &format!("完成 ({}/{})", _done, total));
         }));
     }
 
@@ -489,10 +489,9 @@ pub async fn download_files_parallel(
         success: success_count.load(Ordering::Relaxed) as usize,
         failed: failed_count.load(Ordering::Relaxed) as usize,
         skipped: skipped_count.load(Ordering::Relaxed) as usize,
-        errors: Vec::new(),
     };
 
-    eprintln!(
+    log::info!(
         "[DL] 批量完成: {}/{} 成功, {} 跳过, {} 失败",
         result.success, result.total, result.skipped, result.failed
     );
@@ -555,7 +554,7 @@ async fn download_single_with_batch(
                     file.state = DownloadState::Verifying;
 
                     if let Some(err) = file.check.check(&file.local_path) {
-                        eprintln!("[DL] 校验失败: {} ({})", file.file_name(), err);
+                        log::error!("[DL] 校验失败: {} ({})", file.file_name(), err);
                         cleanup_temp(&file.local_path).await;
                         last_error = format!("校验失败: {}", err);
                         continue;
@@ -565,7 +564,7 @@ async fn download_single_with_batch(
                     return Ok(size);
                 }
                 Err(e) => {
-                    eprintln!("[DL] 失败 (重试 {}/3): {}", retry, e);
+                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
                     cleanup_temp(&file.local_path).await;
                     last_error = e;
                     if retry < 3 {
@@ -602,7 +601,7 @@ async fn download_single_with_batch_progress(
     }
 
     let content_length = resp.content_length().unwrap_or(file_total);
-    eprintln!("[DL] 响应: total={}, url={}", content_length, url);
+    log::debug!("[DL] 响应: total={}, url={}", content_length, url);
 
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
@@ -656,105 +655,4 @@ async fn download_single_with_batch_progress(
         .map_err(|e| format!("重命名失败: {}", e))?;
 
     Ok(downloaded)
-}
-
-/// 简化的批量下载 — 从 URL 列表直接下载
-#[allow(dead_code)]
-pub async fn download_urls_parallel(
-    app: &tauri::AppHandle,
-    tasks: Vec<(Vec<String>, PathBuf, FileChecker)>,
-    max_threads: usize,
-    step_label: &str,
-) -> DownloadResult {
-    let files: Vec<DownloadFile> = tasks
-        .into_iter()
-        .map(|(urls, path, check)| DownloadFile::new(urls, path, check))
-        .collect();
-
-    let total = files.len();
-    if total == 0 {
-        return DownloadResult {
-            total: 0, success: 0, failed: 0, skipped: 0, errors: Vec::new(),
-        };
-    }
-
-    let dl_threads = config_read("user".to_string())
-        .ok()
-        .and_then(|c| c["dl_threads"].as_str().and_then(|s| s.parse::<usize>().ok()))
-        .unwrap_or(max_threads).max(1).min(64);
-
-    let total_bytes: u64 = files.iter().map(|f| f.check.actual_size.max(0) as u64).sum();
-    let label = step_label.to_string();
-
-    let batch = Arc::new(BatchProgress {
-        batch_id: next_batch_id(),
-        total_files: total as u64,
-        done_files: AtomicU64::new(0),
-        total_bytes: AtomicU64::new(total_bytes),
-        downloaded_bytes: AtomicU64::new(0),
-        active_speeds: std::sync::Mutex::new(Vec::new()),
-    });
-
-    let sem = Arc::new(tokio::sync::Semaphore::new(dl_threads));
-    let success_count = Arc::new(AtomicU64::new(0));
-    let failed_count = Arc::new(AtomicU64::new(0));
-    let skipped_count = Arc::new(AtomicU64::new(0));
-
-    let mut handles = Vec::new();
-    for idx in 0..files.len() {
-        if is_cancelled() { break; }
-        let a = app.clone();
-        let s = sem.clone();
-        let batch = batch.clone();
-        let sc = success_count.clone();
-        let fc = failed_count.clone();
-        let sk = skipped_count.clone();
-
-        let urls = files[idx].urls.clone();
-        let local_path = files[idx].local_path.clone();
-        let check = files[idx].check.clone();
-        let can_use = check.can_use_exists;
-        let file_size = check.actual_size.max(0) as u64;
-        let lbl_clone = label.clone();
-
-        handles.push(tokio::spawn(async move {
-            let _permit = s.acquire().await.unwrap();
-            if is_cancelled() { return; }
-
-            let fname = local_path.file_name()
-                .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-
-            if can_use && check.check(&local_path).is_none() {
-                sk.fetch_add(1, Ordering::Relaxed);
-                batch.downloaded_bytes.fetch_add(file_size, Ordering::Relaxed);
-                let _done = batch.done_files.fetch_add(1, Ordering::Relaxed) + 1;
-                batch.emit(&a, &fname, 100, 0, file_size, file_size,
-                    &format!("{}: 跳过", lbl_clone));
-                return;
-            }
-
-            let mut df = DownloadFile::new(urls, local_path, check);
-            match download_single_with_batch(&a, &mut df, false, &batch, &fname).await {
-                Ok(bytes) => {
-                    sc.fetch_add(1, Ordering::Relaxed);
-                    batch.downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
-                }
-                Err(_) => { fc.fetch_add(1, Ordering::Relaxed); }
-            }
-
-            let _done = batch.done_files.fetch_add(1, Ordering::Relaxed) + 1;
-            batch.emit(&a, &fname, 100, 0, file_size, file_size,
-                &format!("{}: 完成 ({}/{})", lbl_clone, _done, total));
-        }));
-    }
-
-    for h in handles { let _ = h.await; }
-
-    DownloadResult {
-        total,
-        success: success_count.load(Ordering::Relaxed) as usize,
-        failed: failed_count.load(Ordering::Relaxed) as usize,
-        skipped: skipped_count.load(Ordering::Relaxed) as usize,
-        errors: Vec::new(),
-    }
 }

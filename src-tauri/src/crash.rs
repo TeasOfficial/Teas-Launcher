@@ -7,6 +7,13 @@ pub(crate) fn check_crash(
     mc_dir: String,
     instance_name: String,
 ) -> Option<serde_json::Value> {
+    // 用户主动点"停止"时进程会被强杀，latest.log 既不写 "Stopping!" 也可能
+    // 残留错误关键字，直接判定为崩溃属于误报。这种情况一律返回 None。
+    if crate::launch::last_exit_was_user_kill() {
+        log::info!("[crash] 上次退出是用户主动终止，跳过崩溃检测");
+        return None;
+    }
+
     let base = std::path::Path::new(&mc_dir);
     let dot_minecraft = if base.join(".minecraft").exists() {
         base.join(".minecraft")

@@ -1,88 +1,23 @@
-//! JSON 合并 — 参照 PCL-CE MergeJson()
+//! Loader 安装共享原语 — 参照 PCL-CE MergeJson()
 //!
-//! 多 loader 同时安装时合并 version.json:
-//! - 合并所有 libraries (去重)
-//! - 合并 arguments (game + jvm)
-//! - 根据 loader 类型决定是否保留 inheritsFrom
-//! #![allow(dead_code)] — 未来前端将调用
+//! Fabric / Quilt / Forge / NeoForge / 整合包 的安装流程共用以下四步，
+//! 全部集中在此处，避免各 loader 各自维护一份实现：
+//! 1. `download_vanilla_json_mem`  — 取原版版本 JSON（不落盘）
+//! 2. `merge_libraries`            — 合并 libraries（按 name 去重）
+//! 3. `strip_to_self_contained`    — 消除 inheritsFrom，转为自包含 JSON
+//! 4. `download_libs_and_client_jar` — 下载 libraries + 原版 client JAR
+//!
+//! 另有 `parse_modpack_deps` 解析整合包依赖中的 loader 类型与版本。
 
+use crate::download::engine::{download_file, download_files_parallel};
+use crate::download::model::{DownloadFile, FileChecker};
+use crate::download::source::source_launcher_or_meta;
+use crate::version::library::{mclib_list_from_json, mclib_to_download_files};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// 合并多个 loader 的 version JSON 到一个
-///
-/// 参照 PCL-CE MergeJson:
-#[allow(dead_code)]
-pub fn merge_instance_json(
-    mc_dir: &Path,
-    instance_name: &str,
-    vanilla_mc_version: &str,
-    loader_type: &str,
-    loader_json: &serde_json::Value,
-) -> Result<(), String> {
-    let target = mc_dir.join("versions").join(instance_name);
-    let json_path = target.join(format!("{}.json", instance_name));
-
-    // 读取现有的 JSON (如果已由原版安装器创建)
-    let mut merged = if json_path.exists() {
-        let content = std::fs::read_to_string(&json_path).map_err(|e| e.to_string())?;
-        serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?
-    } else {
-        serde_json::json!({
-            "id": instance_name,
-            "inheritsFrom": vanilla_mc_version,
-        })
-    };
-
-    // 特殊处理：Forge/NeoForge/Cleanroom 的 JSON 已经是完整 JSON
-    // 它们包含自己的 mainClass 和完整的 libraries
-    match loader_type {
-        "forge" | "neoforge" | "cleanroom" => {
-            // 这些 loader 的 JSON 已经是完整版本
-            // 我们只需保留它们的核心字段
-            if let Some(mc) = loader_json.get("mainClass").cloned() {
-                merged["mainClass"] = mc;
-            }
-            if let Some(args) = loader_json.get("arguments").cloned() {
-                merged["arguments"] = args;
-            }
-            // 合并 libraries
-            merge_libraries(&mut merged, loader_json);
-            // Forge/NeoForge 可能不需要 inheritsFrom (1.17+ 版本的 Forge
-            // 在 profile JSON 中已包含完整的 libraries 列表)
-            if let Some(inh) = loader_json.get("inheritsFrom").and_then(|v| v.as_str()) {
-                merged["inheritsFrom"] = serde_json::Value::String(inh.to_string());
-            }
-        }
-        "fabric" | "quilt" | "legacyfabric" => {
-            // 这些 loader 的 profile JSON 包含完整的 libraries (无 inheritsFrom)
-            // 直接使用 loader JSON 作为基础
-            merged = loader_json.clone();
-            merged["id"] = serde_json::Value::String(instance_name.to_string());
-        }
-        "optifine" | "liteloader" | "labymod" => {
-            // 这些 loader 创建的是轻量 inheritsFrom JSON
-            // 追加 libraries
-            merge_libraries(&mut merged, loader_json);
-        }
-        _ => {
-            merge_libraries(&mut merged, loader_json);
-        }
-    }
-
-    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &json_path,
-        serde_json::to_string_pretty(&merged).unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-/// 合并 libraries 列表 (去重)
-#[allow(dead_code)]
-fn merge_libraries(target: &mut serde_json::Value, source: &serde_json::Value) {
+/// 合并 libraries 列表到 target（去重 key: name 字段）
+pub(crate) fn merge_libraries(target: &mut serde_json::Value, source: &serde_json::Value) {
     let source_libs = source
         .get("libraries")
         .and_then(|v| v.as_array())
@@ -95,26 +30,103 @@ fn merge_libraries(target: &mut serde_json::Value, source: &serde_json::Value) {
         .cloned()
         .unwrap_or_default();
 
-    // 去重 key: name 字段
     let mut seen: HashSet<String> = cur_libs
         .iter()
         .filter_map(|l| l.get("name").and_then(|n| n.as_str().map(|s| s.to_string())))
         .collect();
 
     for lib in source_libs {
-        let key = lib
-            .get("name")
-            .and_then(|n| n.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
-        if !key.is_empty() && !seen.contains(&key) {
-            seen.insert(key);
-            cur_libs.push(lib);
+        if let Some(name) = lib.get("name").and_then(|n| n.as_str()) {
+            if !seen.contains(name) {
+                seen.insert(name.to_string());
+                cur_libs.push(lib);
+            }
         }
     }
 
     target["libraries"] = serde_json::Value::Array(cur_libs);
+}
+
+/// 转为自包含 JSON：消除 inheritsFrom / _comment_ / jar，写入实例 id
+///
+/// 参照 PCL-CE MergeJson 的收尾步骤。显式移除 `inheritsFrom` 是启动正确的前提——
+/// 生成的 JSON 已含合并后的完整 libraries 与 arguments，不能再让启动器回查父版本。
+pub(crate) fn strip_to_self_contained(json: &mut serde_json::Value, instance_name: &str) {
+    if let Some(o) = json.as_object_mut() {
+        o.remove("inheritsFrom");
+        o.remove("_comment_");
+        o.remove("jar");
+    }
+    json["id"] = serde_json::Value::String(instance_name.to_string());
+}
+
+/// 从 Mojang 版本清单解析并下载原版版本 JSON（不落盘）
+pub(crate) async fn download_vanilla_json_mem(
+    client: &reqwest::Client,
+    mc_ver: &str,
+) -> Result<serde_json::Value, String> {
+    let manifest: serde_json::Value = client
+        .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let ver_url = manifest["versions"]
+        .as_array()
+        .ok_or("版本清单为空")?
+        .iter()
+        .find(|v| v["id"].as_str() == Some(mc_ver))
+        .and_then(|v| v["url"].as_str())
+        .ok_or(format!("找不到版本 {}", mc_ver))?;
+
+    for url in &source_launcher_or_meta(ver_url, false) {
+        if let Ok(resp) = client.get(url).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if json.get("libraries").is_some() {
+                    return Ok(json);
+                }
+            }
+        }
+    }
+    Err(format!("无法下载原版 JSON: {}", mc_ver))
+}
+
+/// 下载 JSON 中声明的全部 libraries，以及原版 client JAR
+///
+/// 原版 JAR 与 libraries 一样是启动必需文件；有 sha1/size 时优先按哈希校验，
+/// 避免残缺文件被当作"已存在"而跳过。
+pub(crate) async fn download_libs_and_client_jar(
+    app: &tauri::AppHandle,
+    mc_dir: &Path,
+    instance_json: &serde_json::Value,
+    instance_name: &str,
+    vanilla_json: &serde_json::Value,
+) {
+    let libs = mclib_list_from_json(instance_json, mc_dir);
+    let mut dl_files = mclib_to_download_files(&libs, false);
+
+    if let Some(jar_url) = vanilla_json["downloads"]["client"]["url"].as_str() {
+        let target = mc_dir.join("versions").join(instance_name);
+        let jar_path = target.join(format!("{}.jar", instance_name));
+        let sha1 = vanilla_json["downloads"]["client"]["sha1"]
+            .as_str()
+            .map(|s| s.to_string());
+        let size = vanilla_json["downloads"]["client"]["size"]
+            .as_i64()
+            .unwrap_or(-1);
+        let checker = FileChecker::new(1024, size, sha1);
+        if checker.check(&jar_path).is_some() {
+            let urls = source_launcher_or_meta(jar_url, false);
+            dl_files.push(DownloadFile::new(urls, jar_path, checker));
+        }
+    }
+
+    if !dl_files.is_empty() {
+        download_files_parallel(app, &mut dl_files, 8).await;
+    }
 }
 
 /// 解析整合包索引中的 loader 类型和版本
@@ -136,4 +148,15 @@ pub fn parse_modpack_deps(index: &serde_json::Value) -> (String, String, String)
     } else {
         ("vanilla".to_string(), "".to_string(), mc_ver.to_string())
     }
+}
+
+/// 下载单个文件到指定路径（instaleler JAR 等）
+pub(crate) async fn fetch_single(
+    app: &tauri::AppHandle,
+    urls: Vec<String>,
+    dest: std::path::PathBuf,
+    min_size: i64,
+) -> Result<(), String> {
+    let mut dl = DownloadFile::new(urls, dest, FileChecker::with_min_size(min_size));
+    download_file(app, &mut dl, false).await
 }

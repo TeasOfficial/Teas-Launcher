@@ -309,7 +309,7 @@ pub fn calc_auto_memory(
     }
 
     // PCL: 根据实例类型确定基础内存需求目标
-    let (ram_min, ram_t1, ram_t2, ram_t3) = if has_mod_loader {
+    let (_ram_min, ram_t1, ram_t2, ram_t3) = if has_mod_loader {
         // 可安装 Mod 的版本 (Forge/Fabric/NeoForge)
         let mc = mod_count as f64;
         (0.5 + mc / 150.0, 1.5 + mc / 90.0, 2.7 + mc / 50.0, 4.5 + mc / 25.0)
@@ -351,4 +351,13 @@ pub fn calc_auto_memory(
 
     let result = if ram_give < 0.5 { 0.5 } else if ram_give > ram_arch_cap { ram_arch_cap } else { ram_give };
     (result * 1024.0) as u32
+}
+
+/// 计算离线账户的 UUID（HMCL 风格：MD5("OfflinePlayer:" + name)）
+///
+/// 前端创建离线账户时存下它，仪表盘才能显示真正的 UUID —— 之前那里显示的是
+/// 账户类型名（"离线账户"），因为 Account 结构里根本没有 uuid 字段。
+#[tauri::command]
+pub(crate) fn offline_uuid(player_name: String) -> String {
+    crate::utils::offline_uuid(&player_name)
 }

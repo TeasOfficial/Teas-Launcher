@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, inject } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useGameInstall } from "../composables/useGameInstall";
 
 const activeInstance = inject<any>("activeInstance");
 
@@ -40,221 +41,27 @@ const categories = [
   { id: "resource" as Section, zh: "模组资源", en: "MODS & MORE", icon: "⬡" },
 ];
 
-const gameVersions = [
-  { name: "release", zh: "正式版", en: "Release", desc: "稳定版本，推荐使用" },
-  { name: "snapshot", zh: "快照版", en: "Snapshot", desc: "预览下周目内容" },
-  { name: "old_beta old_alpha", zh: "旧版", en: "Legacy", desc: "历史版本归档" },
-];
-const gameExpanded = ref("");
-const gameLeaving = ref(""); // 正在收起的卡片类型
-const gameVersionList = ref<{ id: string; type: string; url: string; time: string; releaseTime: string }[]>([]);
-const gameLoading = ref(false);
+// ── 下载任务管理（页面内所有安装流程共用）──
+const installMsg = ref("");
+const addDlTask = inject<(name: string) => number>("addDlTask", () => { console.error("[DL] addDlTask 注入失败!"); return 0; });
+const updateDlTask = inject<(id: number, status: string) => void>("updateDlTask", () => { console.error("[DL] updateDlTask 注入失败!"); });
+const finishDlTask = inject<(id: number, error?: string) => void>("finishDlTask", () => { console.error("[DL] finishDlTask 注入失败!"); });
 
-async function toggleGameCard(type: string) {
-  if (gameExpanded.value === type) {
-    // 收起：先清 gameExpanded 触发 Vue leave，但保持 expanded 类到动画结束
-    gameExpanded.value = "";
-    gameLeaving.value = type;
-    setTimeout(() => { gameLeaving.value = ""; }, 300);
-    return;
-  }
-  // 展开其他卡片时，如果当前有展开的先收起
-  if (gameExpanded.value) { gameExpanded.value = ""; }
-  gameExpanded.value = type;
-  gameVersionList.value = [];
-  gameLoading.value = true;
-  try {
-    const manifest = await invoke<any>("fetch_version_manifest");
-    const all: any[] = manifest.versions || [];
-    const filters = type.split(" ");
-    gameVersionList.value = all
-      .filter((v: any) => filters.includes(v.type))
-      .sort((a, b) => b.releaseTime.localeCompare(a.releaseTime));
-    // ★ 同时获取 Forge 支持的 MC 版本列表（用于标记兼容性）
-    try {
-      forgeMcVersions.value = await invoke<string[]>("fetch_forge_mc_versions");
-    } catch { forgeMcVersions.value = []; }
-  } catch { /* */ }
-  gameLoading.value = false;
-}
+async function getModSource() { try { const cfg=await invoke("config_read",{scope:"user"}); return cfg.mod_source||"MCIMirror"; } catch { return "MCIMirror"; } }
 
-// 判断是否应该显示版本列表（展开或正在离开动画中）
-function isGameCardExpanded(itemName: string) {
-  return gameExpanded.value === itemName || gameLeaving.value === itemName;
-}
+// ── 游戏版本安装向导（状态机见 composables/useGameInstall.ts）──
+const {
+  gameVersions, gameExpanded, gameLeaving, gameVersionList, gameLoading,
+  toggleGameCard, isGameCardExpanded,
+  showGameInstall, selectedGameVer, forgeMcVersions,
+  selectedLoader, selectedLoaderVer, installGameInstanceName,
+  showLoaderVersions, loaderVersionList, loaderVersionLoading, pendingLoader,
+  openLoaderVersions, confirmLoaderVersion, backToLoaderSelect,
+  loaderOptions, isLoaderCompatible, getRecommendedLoader, getLoaderIncompatReason,
+  isLoaderDisabled, selectLoader, gameInstallName,
+  doInstallGame, closeGameInstall, openGameInstall,
+} = useGameInstall({ addDlTask, updateDlTask, finishDlTask, installMsg });
 
-// ── 游戏版本安装对话框 ──
-const showGameInstall = ref(false);
-const selectedGameVer = ref("");
-const forgeMcVersions = ref<string[]>([]); // Forge 支持的 MC 版本 (用于标记兼容)
-const selectedLoader = ref("");
-const selectedLoaderVer = ref("");
-
-// 加载器版本选择子页面
-const showLoaderVersions = ref(false);
-const loaderVersionList = ref<{ version: string; stable: boolean }[]>([]);
-const loaderVersionLoading = ref(false);
-const pendingLoader = ref("");
-
-async function openLoaderVersions(loaderId: string) {
-  if (!loaderId) { selectedLoader.value = ""; selectedLoaderVer.value = ""; return; }
-  pendingLoader.value = loaderId;
-  showLoaderVersions.value = true;
-  loaderVersionList.value = [];
-  loaderVersionLoading.value = true;
-  try {
-    if (loaderId === "forge") {
-      const list = await invoke<any[]>("fetch_forge_versions", {
-        mcVersion: selectedGameVer.value,
-      });
-      loaderVersionList.value = (list || []).map(v => ({
-        version: v.version,
-        stable: v.category === "installer",
-      }));
-    } else if (loaderId === "neoforge") {
-      const list = await invoke<any[]>("fetch_neoforge_versions");
-      loaderVersionList.value = (list || [])
-        .filter((v: any) => v.mc_version === selectedGameVer.value || v.mc_version === "")
-        .map((v: any) => ({ version: v.version, stable: v.stable }));
-    } else if (loaderId === "fabric" || loaderId === "quilt") {
-      const fnName = loaderId === "fabric" ? "fetch_fabric_versions" : "fetch_quilt_versions";
-      const full = await invoke<any>(fnName);
-      const gameNormalized = selectedGameVer.value.replace("∞", "infinite").replace("Combat Test 7c", "1.16_combat-3");
-      const supported = (full.game || []).some((g: any) => g.version === gameNormalized);
-      if (supported) {
-        loaderVersionList.value = (full.loader || []).map((v: any) => ({
-          version: v.version, stable: v.stable,
-        }));
-      }
-    } else if (loaderId === "cleanroom") {
-      const list = await invoke<any[]>("fetch_cleanroom_versions");
-      loaderVersionList.value = (list || []).map((v: any) => ({
-        version: v.version, stable: !v.isBeta,
-      }));
-    }
-  } catch { /* */ }
-  loaderVersionLoading.value = false;
-}
-
-function confirmLoaderVersion(ver: string) {
-  selectedLoader.value = pendingLoader.value;
-  selectedLoaderVer.value = ver;
-  showLoaderVersions.value = false;
-}
-
-function backToLoaderSelect() {
-  showLoaderVersions.value = false;
-  // 保持之前的选择不变
-}
-
-interface LoaderOption { id: string; zh: string; en: string; conflicts: string[]; desc: string; minVer?: string; maxVer?: string }
-const loaderOptions: LoaderOption[] = [
-  { id: "", zh: "无（原版）", en: "Vanilla", conflicts: [], desc: "不安装任何模组加载器" },
-  { id: "forge", zh: "Forge", en: "Forge", conflicts: ["fabric", "quilt"], desc: "最广泛的模组生态" },
-  { id: "fabric", zh: "Fabric", en: "Fabric", conflicts: ["forge", "neoforge", "cleanroom"], desc: "轻量高性能加载器", minVer: "1.14" },
-  { id: "neoforge", zh: "NeoForge", en: "NeoForge", conflicts: ["forge", "fabric", "quilt"], desc: "Forge 社区分支", minVer: "1.20.1" },
-  { id: "quilt", zh: "Quilt", en: "Quilt", conflicts: ["forge", "neoforge", "cleanroom"], desc: "Fabric 社区分支", minVer: "1.18", maxVer: "1.20.4" },
-  { id: "cleanroom", zh: "Cleanroom", en: "Cleanroom", conflicts: ["forge", "neoforge", "fabric", "quilt"], desc: "Forge 1.12.2 轻量替代", minVer: "1.12.2", maxVer: "1.12.2" },
-];
-
-function parseMcVersion(ver: string): number[] {
-  // 提取 "1.20.1" 中的数字部分
-  const m = ver.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-  if (!m) return [0, 0, 0];
-  return [parseInt(m[1]), parseInt(m[2]), parseInt(m[3] || "0")];
-}
-
-function versionCmp(a: string, b: string): number {
-  const va = parseMcVersion(a), vb = parseMcVersion(b);
-  for (let i = 0; i < 3; i++) { if (va[i] !== vb[i]) return va[i] - vb[i]; }
-  return 0;
-}
-
-function isLoaderCompatible(loader: LoaderOption): boolean {
-  if (!loader.minVer && !loader.maxVer) return true;
-  const ver = selectedGameVer.value;
-  if (loader.minVer && versionCmp(ver, loader.minVer) < 0) return false;
-  if (loader.maxVer && versionCmp(ver, loader.maxVer) > 0) return false;
-  return true;
-}
-
-function getRecommendedLoader(): string {
-  return versionCmp(selectedGameVer.value, "1.21") >= 0 ? "neoforge" : "forge";
-}
-
-function getLoaderIncompatReason(loader: LoaderOption): string {
-  if (loader.minVer && versionCmp(selectedGameVer.value, loader.minVer) < 0)
-    return `需要 ${loader.minVer}+`;
-  if (loader.maxVer && versionCmp(selectedGameVer.value, loader.maxVer) > 0)
-    return `仅支持 ≤${loader.maxVer}`;
-  return "";
-}
-
-const installGameInstanceName = ref("");
-
-const gameInstallName = function(): string {
-  if (!selectedLoader.value) return selectedGameVer.value;
-  const loader = loaderOptions.find(l => l.id === selectedLoader.value);
-  const base = loader ? `${selectedGameVer.value}-${loader.en}` : selectedGameVer.value;
-  return selectedLoaderVer.value ? `${base} ${selectedLoaderVer.value}` : base;
-};
-
-async function doInstallGame() {
-  const name = installGameInstanceName.value.trim() || gameInstallName();
-  showGameInstall.value = false;
-  const taskId = addDlTask(name);
-  installMsg.value = `正在安装 ${name}...`;
-  let success = false;
-  let errorMsg = "";
-  try {
-    const mcDir = await invoke<string>("get_minecraft_dir");
-    const source = await getModSource();
-    const msg = await invoke<string>("install_game", {
-      mcDir, instanceName: name, mcVersion: selectedGameVer.value,
-      loader: selectedLoader.value || null,
-      loaderVersion: selectedLoaderVer.value || null,
-      source,
-    });
-    installMsg.value = msg;
-    success = true;
-  } catch (e) {
-    errorMsg = String(e);
-    installMsg.value = `安装失败: ${errorMsg}`;
-  } finally {
-    updateDlTask(taskId, success ? "已完成" : "失败");
-    finishDlTask(taskId, success ? undefined : errorMsg);
-    setTimeout(() => { if (installMsg.value === `安装失败: ${errorMsg}` || installMsg.value === `正在安装 ${name}...`) installMsg.value = ""; }, 5000);
-  }
-  closeGameInstall();
-}
-
-function closeGameInstall() {
-  showGameInstall.value = false;
-  selectedLoader.value = "";
-  selectedLoaderVer.value = "";
-  showLoaderVersions.value = false;
-}
-
-function openGameInstall(verId: string) {
-  selectedGameVer.value = verId;
-  selectedLoader.value = "";
-  selectedLoaderVer.value = "";
-  showLoaderVersions.value = false;
-  showGameInstall.value = true;
-}
-
-function selectLoader(id: string) {
-  // 检查冲突：如果点击的 loader 与已选的冲突，直接切换
-  selectedLoader.value = id;
-}
-
-function isLoaderDisabled(loader: LoaderOption): boolean {
-  if (!selectedLoader.value) return false;
-  // 已选的 loader 和当前 loader 互相冲突
-  const sel = loaderOptions.find(l => l.id === selectedLoader.value);
-  if (!sel) return false;
-  return sel.conflicts.includes(loader.id) || loader.conflicts.includes(sel.id);
-}
 
 const resourceTypes = [
   { id: "mods", zh: "模组", en: "Mods", desc: "Forge / Fabric / NeoForge", bbsmcType: "mod" },
@@ -324,6 +131,10 @@ const searchTotal = ref(0);
 const searchOffset = ref(0);
 const currentBbsmcType = ref("");
 const searchLimit = 20;
+/** 是否已经发起过搜索 — 区分"还没搜"与"搜了但没结果" */
+const searchRequested = ref(false);
+/** 搜索失败原因，为空表示无错误 */
+const searchError = ref("");
 
 let searchDebounce: number | null = null;
 
@@ -346,6 +157,8 @@ async function doSearch(page: number = 0) {
   if (page === 0) searchResults.value = []; // 新搜索先清空
   searchLoading.value = true;
   searchOffset.value = page * searchLimit;
+  searchRequested.value = true;
+  searchError.value = "";
   try {
     if (modSource.value === "CurseForge") {
       const result = await invoke<any>("search_curseforge", {
@@ -372,11 +185,17 @@ async function doSearch(page: number = 0) {
         version: searchVersion.value, sort: searchSort.value,
         limit: searchLimit, offset: searchOffset.value,
       });
-      const hits = (result.hits || []) as SearchHit[];
-      searchResults.value = hits.filter(h => h.project_type === currentBbsmcType.value);
+      // 服务端已按 project_type facet 过滤，此处不能再按返回的 project_type 二次过滤：
+      // Modrinth 的 facet 会跨类型命中（datapack facet 也会返回 project_type=mod 的世界生成包），
+      // 二次过滤会把结果整批丢掉，表现为"搜索永远没结果"。
+      searchResults.value = (result.hits || []) as SearchHit[];
       searchTotal.value = result.total_hits || 0;
     }
-  } catch { /* */ }
+  } catch (e) {
+    searchError.value = String(e);
+    searchTotal.value = 0;
+    console.error("[search] 搜索失败:", e);
+  }
   searchLoading.value = false;
 }
 
@@ -495,12 +314,7 @@ async function confirmModpackInstall() {
   }
 }
 
-const installMsg = ref("");
-const addDlTask = inject<(name: string) => number>("addDlTask", () => { console.error("[DL] addDlTask 注入失败!"); return 0; });
-const updateDlTask = inject<(id: number, status: string) => void>("updateDlTask", () => { console.error("[DL] updateDlTask 注入失败!"); });
-const finishDlTask = inject<(id: number, error?: string) => void>("finishDlTask", () => { console.error("[DL] finishDlTask 注入失败!"); });
 
-async function getModSource() { try { const cfg=await invoke("config_read",{scope:"user"}); return cfg.mod_source||"MCIMirror"; } catch { return "MCIMirror"; } }
 
 async function installFile(url: string, filename: string) {
   const taskId = addDlTask(filename);
@@ -678,6 +492,14 @@ function goBack() {
             <span class="dl-page-info">{{ Math.floor(searchOffset/searchLimit)+1 }} / {{ Math.ceil(searchTotal/searchLimit) }}</span>
             <button class="dl-page-btn" :disabled="searchOffset+searchLimit >= searchTotal" @click="doSearch(Math.floor(searchOffset/searchLimit)+1)">下一页 →</button>
           </div>
+        </div>
+        <div class="dl-results-error" v-else-if="searchError">
+          <span class="bl-zh">搜索失败: {{ searchError }}</span>
+          <span class="bl-en">SEARCH FAILED</span>
+        </div>
+        <div class="dl-results-empty" v-else-if="searchRequested && !searchLoading">
+          <span class="bl-zh">没有找到结果，换个关键词试试</span>
+          <span class="bl-en">NO RESULTS FOUND</span>
         </div>
         <div class="dl-results-empty" v-else-if="!searchLoading">
           <span class="bl-zh">输入关键词搜索{{ searchType }}</span>

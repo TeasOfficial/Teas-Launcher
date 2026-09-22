@@ -33,11 +33,14 @@ function closeDialog() {
 
 async function createAccount() {
   if (dialogMode.value === "offline" && offlineName.value.trim()) {
+    const name = offlineName.value.trim();
+    // 存下真正的离线 UUID，否则仪表盘只能拿账户类型名冒充 UUID
+    let uuid = "";
+    try { uuid = await invoke<string>("offline_uuid", { playerName: name }); } catch { /* 保留空值 */ }
     accounts.value.push({
       icon: "◉", nameZh: "离线账户", nameEn: "Offline Account",
-      statusZh: offlineName.value.trim().toUpperCase(),
-      statusEn: offlineName.value.trim().toUpperCase(),
-      active: accounts.value.length === 0, type: "offline",
+      statusZh: name.toUpperCase(), statusEn: name.toUpperCase(),
+      active: accounts.value.length === 0, type: "offline", uuid,
     } as Account);
     await saveAccounts();
     closeDialog();
@@ -48,8 +51,6 @@ async function createAccount() {
       active: accounts.value.length === 0, type: "authlib",
     } as Account);
     await saveAccounts();
-    closeDialog();
-  } else if (dialogMode.value === "microsoft") {
     closeDialog();
   }
 }
@@ -172,11 +173,11 @@ async function removeAccount(index: number) {
           </div>
 
           <div v-if="dialogMode === 'microsoft'" class="modal-body">
-            <p class="modal-desc">即将打开浏览器进行 Microsoft 账户登录验证。</p>
-            <p class="modal-desc-sub">A browser window will open for Microsoft authentication.</p>
+            <p class="modal-desc">Microsoft 正版登录尚未实现，当前版本请使用离线账户或外置验证。</p>
+            <p class="modal-desc-sub">Microsoft authentication is not implemented yet — use an offline or authlib account for now.</p>
             <div class="modal-actions">
-              <button class="acct-type-btn cancel" @click="closeDialog">取消</button>
-              <button class="acct-type-btn confirm" @click="createAccount">打开浏览器</button>
+              <button class="acct-type-btn cancel" @click="closeDialog">关闭</button>
+              <button class="acct-type-btn confirm" disabled title="尚未实现">暂不可用</button>
             </div>
           </div>
 

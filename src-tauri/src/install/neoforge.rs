@@ -48,7 +48,7 @@ pub async fn install_neoforge_loader(
     );
 
     download_file(app, &mut installer_dl, false).await?;
-    eprintln!("[neoforge] installer.jar 已下载");
+    log::debug!("[neoforge] installer.jar 已下载");
 
     // 解压
     let archive_file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
@@ -96,7 +96,7 @@ pub async fn install_neoforge_loader(
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
-    eprintln!("[neoforge] 安装完成: {}", instance_name);
+    log::info!("[neoforge] 安装完成: {}", instance_name);
     Ok(())
 }
 

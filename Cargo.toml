@@ -7,7 +7,9 @@ members = [
 [workspace.package]
 edition = "2021"
 
-# 体积优化: opt-level="s" + LTO + strip
+# Release 构建: 性能优先 (opt-level=3) + LTO + strip 收缩体积
+# 注: panic="abort" 会让 panic 直接终止进程且不产生回溯，
+#     已在 lib.rs 装 panic hook 将其写入 .teas/launcher.log 兜底。
 [profile.release]
 opt-level = 3
 lto = true

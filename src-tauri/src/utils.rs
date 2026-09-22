@@ -58,7 +58,7 @@ fn scan_with_quickcheck(dir: &std::path::Path, deleted: &mut u32) {
                 if len == 0 || len < 22 {
                     let _ = std::fs::remove_file(&path);
                     *deleted += 1;
-                    eprintln!("[scan:A] 删除空/过小JAR ({}B): {}", len, path.display());
+                    log::warn!("[scan:A] 删除空/过小JAR ({}B): {}", len, path.display());
                     continue;
                 }
                 // 正常大小范围 (>100KB) 且未发现异常 → 跳过 EOCD 校验
@@ -67,7 +67,7 @@ fn scan_with_quickcheck(dir: &std::path::Path, deleted: &mut u32) {
                     if !is_jar_valid(&path) {
                         let _ = std::fs::remove_file(&path);
                         *deleted += 1;
-                        eprintln!("[scan:A] 删除损坏JAR ({}B): {}", len, path.display());
+                        log::warn!("[scan:A] 删除损坏JAR ({}B): {}", len, path.display());
                     }
                 }
             }
@@ -82,7 +82,7 @@ fn scan_pcl_style(instance_jar: &std::path::Path, deleted: &mut u32) {
         let len = instance_jar.metadata().map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_file(instance_jar);
         *deleted += 1;
-        eprintln!("[scan:B] 删除损坏实例JAR ({}B): {}", len, instance_jar.display());
+        log::warn!("[scan:B] 删除损坏实例JAR ({}B): {}", len, instance_jar.display());
     }
 }
 
@@ -102,7 +102,7 @@ fn scan_parallel(dir: std::path::PathBuf, deleted: std::sync::Arc<std::sync::ato
                     let len = path.metadata().map(|m| m.len()).unwrap_or(0);
                     let _ = std::fs::remove_file(&path);
                     deleted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("[scan:C] 删除损坏JAR ({}B): {}", len, path.display());
+                    log::warn!("[scan:C] 删除损坏JAR ({}B): {}", len, path.display());
                 }
             }
         }
@@ -123,7 +123,7 @@ pub(crate) fn scan_and_fix_jars_with_strategy(
 ) -> u32 {
     match strategy {
         JarScanStrategy::PclStyle => {
-            eprintln!("[scan] 策略B: PCL-CE风格 — 仅校验实例JAR");
+            log::debug!("[scan] 策略B: PCL-CE风格 — 仅校验实例JAR");
             let mut deleted = 0u32;
             if libs_dir.exists() {
                 // 仅清理空文件（快速），不做 EOCD 校验
@@ -133,7 +133,7 @@ pub(crate) fn scan_and_fix_jars_with_strategy(
             deleted
         }
         JarScanStrategy::QuickCheck => {
-            eprintln!("[scan] 策略A: 快速预检 — 大小初筛 + 小文件EOCD校验");
+            log::debug!("[scan] 策略A: 快速预检 — 大小初筛 + 小文件EOCD校验");
             let mut deleted = 0u32;
             if libs_dir.exists() {
                 scan_with_quickcheck(libs_dir, &mut deleted);
@@ -145,7 +145,7 @@ pub(crate) fn scan_and_fix_jars_with_strategy(
             deleted
         }
         JarScanStrategy::Parallel => {
-            eprintln!("[scan] 策略C: 并行扫描 — 多线程递归校验");
+            log::debug!("[scan] 策略C: 并行扫描 — 多线程递归校验");
             let deleted = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
             if libs_dir.exists() {
                 scan_parallel(libs_dir.to_path_buf(), deleted.clone());
@@ -171,41 +171,12 @@ fn clean_empty_jars(dir: &std::path::Path, deleted: &mut u32) {
                     if meta.len() == 0 {
                         let _ = std::fs::remove_file(&path);
                         *deleted += 1;
-                        eprintln!("[scan] 删除空JAR: {}", path.display());
+                        log::warn!("[scan] 删除空JAR: {}", path.display());
                     }
                 }
             }
         }
     }
-}
-
-/// 兼容旧接口的 scan_and_fix_jars（递归全量扫描，方案 A 等效）
-#[allow(dead_code)]
-pub(crate) fn scan_and_fix_jars(dir: &std::path::Path, deleted: &mut u32) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                scan_and_fix_jars(&path, deleted);
-            } else if path.extension().map_or(false, |e| e == "jar" || e == "zip") {
-                if !is_jar_valid(&path) {
-                    let len = path.metadata().map(|m| m.len()).unwrap_or(0);
-                    let _ = std::fs::remove_file(&path);
-                    *deleted += 1;
-                    eprintln!("[scan] 删除损坏JAR ({}B, 无EOCD签名): {}", len, path.display());
-                }
-            }
-        }
-    }
-}
-
-/// 从版本 JSON 中快速读取字符串字段（不用解析完整 JSON）
-pub(crate) fn read_json_field(path: &std::path::Path, name: &str, field: &str) -> Option<String> {
-    let c = std::fs::read_to_string(path.join(format!("{}.json", name))).ok()?;
-    let s = format!("\"{}\": \"", field);
-    let start = c.find(&s)? + s.len();
-    let end = c[start..].find('\"')?;
-    Some(c[start..start + end].to_string())
 }
 
 /// 检测实例的加载器类型
@@ -241,33 +212,25 @@ pub(crate) fn offline_uuid(name: &str) -> String {
     )
 }
 
-/// 检查 JVM/game 参数是否匹配当前操作系统
-#[allow(dead_code)]
-pub(crate) fn arg_matches_current_os(obj: &serde_json::Value) -> bool {
-    if let Some(rules) = obj.get("rules").and_then(|r| r.as_array()) {
-        for rule in rules {
-            let action = rule.get("action").and_then(|a| a.as_str()).unwrap_or("allow");
-            if let Some(os) = rule.get("os") {
-                let os_name = os.get("name").and_then(|n| n.as_str());
-                let is_windows = os_name == Some("windows");
-                #[cfg(target_os = "windows")]
-                {
-                    if !is_windows && os_name.is_some() {
-                        if action == "allow" {
-                            return false;
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    if is_windows {
-                        if action == "allow" {
-                            return false;
-                        }
-                    }
-                }
+/// 递归移动目录内容（源目录保留，不删除）
+pub(crate) fn move_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    if !src.exists() { return Ok(()); }
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let dest = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            move_dir_contents(&entry.path(), &dest)?;
+        } else {
+            if dest.exists() {
+                let _ = std::fs::remove_file(&dest);
             }
+            std::fs::copy(entry.path(), &dest).map_err(|e| e.to_string())?;
         }
     }
-    true
+
+    Ok(())
 }

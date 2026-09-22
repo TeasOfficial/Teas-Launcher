@@ -8,6 +8,10 @@ use crate::download::engine::download_file;
 use crate::download::model::{DownloadFile, FileChecker};
 use crate::download::source::source_mod_download;
 use crate::http::{apply_source, build_http_client, is_cancelled, reset_cancel};
+use crate::install::merge::{
+    download_libs_and_client_jar, download_vanilla_json_mem, fetch_single, merge_libraries,
+    strip_to_self_contained,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -43,7 +47,7 @@ pub async fn install_modpack(
         let local_path = url.strip_prefix("file:///").unwrap_or(&url).replace('/', "\\");
         let file_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
         let size_mb = file_size as f64 / 1048576.0;
-        eprintln!("[modpack] copying local file: {} -> {} ({} MB)", local_path, tmp_file.display(), size_mb as u64);
+        log::debug!("[modpack] copying local file: {} -> {} ({} MB)", local_path, tmp_file.display(), size_mb as u64);
         app.emit("download-progress", serde_json::json!({
             "filename": &instance_name, "downloaded": 0u64, "total": file_size, "percent": 0,
             "step": format!("复制整合包 ({} MB)...", size_mb as u64)
@@ -72,7 +76,7 @@ pub async fn install_modpack(
     let file = std::fs::File::open(&tmp_file).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法读取: {}", e))?;
     let total_entries = archive.len();
-    eprintln!("[modpack] extracting {} entries", total_entries);
+    log::debug!("[modpack] extracting {} entries", total_entries);
     app.emit("download-progress", serde_json::json!({
         "filename": &instance_name, "downloaded": 0u64, "total": total_entries as u64, "percent": 5,
         "step": format!("解压整合包 ({} MB，{} 个文件)...", archive.len(), archive.len())
@@ -99,10 +103,10 @@ pub async fn install_modpack(
         }
     }
     let _ = std::fs::remove_file(&tmp_file);
-    eprintln!("[modpack] extraction done");
+    log::debug!("[modpack] extraction done");
 
     let is_curseforge = tmp_dir.join("manifest.json").exists();
-    eprintln!("[modpack] is_curseforge={}", is_curseforge);
+    log::debug!("[modpack] is_curseforge={}", is_curseforge);
 
     app.emit("download-progress", serde_json::json!({
         "filename": &instance_name, "downloaded": total_entries as u64, "total": total_entries as u64, "percent": 15,
@@ -121,11 +125,11 @@ pub async fn install_modpack(
             tmp_dir.join(overrides_dir)
         };
         if overrides_path.exists() {
-            crate::install::helpers::move_dir_contents(&overrides_path, &target)?;
+            crate::utils::move_dir_contents(&overrides_path, &target)?;
         }
     } else {
         if tmp_dir.join("overrides").exists() {
-            crate::install::helpers::move_dir_contents(&tmp_dir.join("overrides"), &target)?;
+            crate::utils::move_dir_contents(&tmp_dir.join("overrides"), &target)?;
         }
     }
 
@@ -247,7 +251,7 @@ async fn download_modrinth_mods(
 
         let c = client.clone(); let a = app.clone(); let s = sem.clone();
         let cnt = counter.clone(); let tgt = target.to_path_buf();
-        let iname = instance_name.to_string();
+        let _iname = instance_name.to_string();
         let fname = Path::new(&path_str).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path_str.clone());
         let total_u = total as u64;
 
@@ -307,7 +311,7 @@ async fn download_curseforge_mods(
         .collect();
     if file_ids.is_empty() { return Ok(()); }
 
-    eprintln!("[modpack] CurseForge: 请求 {} 个 Mod 的下载信息", file_ids.len());
+    log::info!("[modpack] CurseForge: 请求 {} 个 Mod 的下载信息", file_ids.len());
 
     // PCL: POST https://api.curseforge.com/v1/mods/files
     let request_body = serde_json::json!({"fileIds": &file_ids});
@@ -330,13 +334,13 @@ async fn download_curseforge_mods(
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     let data_count = json["data"].as_array().map(|a| a.len()).unwrap_or(0);
                     if data_count >= 1 {
-                        eprintln!("[modpack] CurseForge API 响应: {} 个 Mod, 来自 {}", data_count, url);
+                        log::debug!("[modpack] CurseForge API 响应: {} 个 Mod, 来自 {}", data_count, url);
                         response_json = Some(json);
                         break;
                     }
                 }
             }
-            Err(e) => eprintln!("[modpack] CurseForge API {} 失败: {}", url, e),
+            Err(e) => log::error!("[modpack] CurseForge API {} 失败: {}", url, e),
         }
     }
 
@@ -359,7 +363,7 @@ async fn download_curseforge_mods(
         }
     }
 
-    eprintln!("[modpack] CurseForge: 解析到 {} 个下载链接", url_map.len());
+    log::info!("[modpack] CurseForge: 解析到 {} 个下载链接", url_map.len());
     let actual_total = url_map.len();
 
     app.emit("download-progress", serde_json::json!({
@@ -381,7 +385,7 @@ async fn download_curseforge_mods(
 
         let c = dl_client.clone(); let a = app.clone(); let s = sem.clone();
         let cnt = counter.clone(); let tgt = target.to_path_buf();
-        let iname = instance_name.to_string();
+        let _iname = instance_name.to_string();
         let total_u = actual_total as u64;
 
         handles.push(tokio::spawn(async move {
@@ -413,7 +417,7 @@ async fn download_curseforge_mods(
                             if bytes.len() > 0 { let _ = std::fs::write(&dest, &bytes); ok = true; }
                         }
                     }
-                    Err(e) => eprintln!("[modpack] download {} failed: {}", url, e),
+                    Err(e) => log::warn!("[modpack] download {} failed: {}", url, e),
                 }
             }
             let n = cnt.fetch_add(1, Ordering::Relaxed) + 1;
@@ -460,14 +464,50 @@ fn parse_curseforge_deps(manifest: &serde_json::Value) -> (String, String, Strin
     else { ("vanilla".to_string(), String::new(), mc_ver) }
 }
 
-// ═══ PCL-CE MergeJson: vanilla + loader → 自包含 JSON ═══
+
+// ═══ Loader 安装: 以原版 JSON 为基础合入 loader JSON ═══
+
+/// 合入 loader JSON → 写出自包含版本 JSON → 下载全部文件
+///
+/// 整合包安装与直接安装的唯一区别是 loader JSON 的来源（meta profile 或
+/// installer.jar 里的 version.json），合入与落盘的收尾步骤完全一致，集中在此处。
+async fn merge_and_install(
+    app: &tauri::AppHandle,
+    mc_dir: &Path,
+    instance_name: &str,
+    mc_ver: &str,
+    loader_json: &serde_json::Value,
+    vanilla_json: &serde_json::Value,
+) -> Result<(), String> {
+    let mut output = vanilla_json.clone();
+    if let Some(o) = output.as_object_mut() {
+        o.remove("releaseTime");
+        o.remove("time");
+    }
+
+    merge_libraries(&mut output, loader_json);
+    if let Some(mc) = loader_json.get("mainClass").cloned() { output["mainClass"] = mc; }
+    if let Some(args) = loader_json.get("arguments").cloned() { output["arguments"] = args; }
+
+    strip_to_self_contained(&mut output, instance_name);
+    output["clientVersion"] = serde_json::Value::String(mc_ver.to_string());
+
+    let target = mc_dir.join("versions").join(instance_name);
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    std::fs::write(
+        target.join(format!("{}.json", instance_name)),
+        serde_json::to_string_pretty(&output).unwrap_or_default(),
+    ).map_err(|e| e.to_string())?;
+
+    download_libs_and_client_jar(app, mc_dir, &output, instance_name, vanilla_json).await;
+    Ok(())
+}
+
+/// Fabric / Quilt — loader JSON 来自 meta profile
 async fn install_loader_with_vanilla_merge(
     app: &tauri::AppHandle, mc_dir: &Path, instance_name: &str, mc_ver: &str,
     loader_ver: &str, loader_type: &str, client: &reqwest::Client,
 ) -> Result<(), String> {
-    let target = mc_dir.join("versions").join(instance_name);
-    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    let vanilla_json = download_json_to_memory(client, mc_ver).await?;
     let profile_url = match loader_type {
         "fabric" => format!("https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json", mc_ver, loader_ver),
         "quilt" => format!("https://meta.quiltmc.org/v3/versions/loader/{}/{}/profile/json", mc_ver, loader_ver),
@@ -475,62 +515,21 @@ async fn install_loader_with_vanilla_merge(
     };
     let resp = client.get(&profile_url).send().await.map_err(|e| e.to_string())?;
     let profile_str = resp.text().await.map_err(|e| e.to_string())?;
-    let mut profile: serde_json::Value = serde_json::from_str(&profile_str).map_err(|e| e.to_string())?;
+    let profile: serde_json::Value =
+        serde_json::from_str(&profile_str).map_err(|e| e.to_string())?;
 
-    // PCL MergeJson: 原版为基础，loader 合入
-    let mut output = vanilla_json.clone();
-    output.as_object_mut().map(|o| { o.remove("releaseTime"); o.remove("time"); });
-    profile.as_object_mut().map(|o| { o.remove("releaseTime"); o.remove("time"); });
-
-    // 合并 loader libraries 到原版
-    if let Some(p_libs) = profile["libraries"].as_array().cloned() {
-        let mut vanilla_libs = output["libraries"].as_array().cloned().unwrap_or_default();
-        let mut seen: std::collections::HashSet<String> = vanilla_libs.iter()
-            .filter_map(|l| l["name"].as_str().map(|s| s.to_string())).collect();
-        for lib in p_libs {
-            if let Some(name) = lib["name"].as_str() {
-                if !seen.contains(name) { seen.insert(name.to_string()); vanilla_libs.push(lib); }
-            }
-        }
-        output["libraries"] = serde_json::Value::Array(vanilla_libs);
-    }
-
-    // Loader 的 mainClass/arguments 覆盖
-    if let Some(mc) = profile.get("mainClass").cloned() { output["mainClass"] = mc; }
-    if let Some(args) = profile.get("arguments").cloned() { output["arguments"] = args; }
-    output.as_object_mut().map(|o| o.remove("inheritsFrom"));
-    output.as_object_mut().map(|o| o.remove("_comment_"));
-    output["id"] = serde_json::Value::String(instance_name.to_string());
-    output["clientVersion"] = serde_json::Value::String(mc_ver.to_string());
-
-    let json_path = target.join(format!("{}.json", instance_name));
-    std::fs::write(&json_path, serde_json::to_string_pretty(&output).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
-
-    // 下载 libraries
-    let libs = crate::version::library::mclib_list_from_json(&output, mc_dir);
-    let mut dl_files = crate::version::library::mclib_to_download_files(&libs, false);
-    if let Some(url) = vanilla_json["downloads"]["client"]["url"].as_str() {
-        let jar_path = target.join(format!("{}.jar", instance_name));
-        let urls = crate::download::source::source_launcher_or_meta(url, false);
-        let checker = FileChecker::with_min_size(1024);
-        if checker.check(&jar_path).is_some() {
-            dl_files.push(DownloadFile::new(urls, jar_path, checker));
-        }
-    }
-    if !dl_files.is_empty() {
-        crate::download::engine::download_files_parallel(app, &mut dl_files, 8).await;
-    }
-    Ok(())
+    let vanilla_json = download_vanilla_json_mem(client, mc_ver).await?;
+    merge_and_install(app, mc_dir, instance_name, mc_ver, &profile, &vanilla_json).await
 }
 
-// ═══ Forge/NeoForge 整合包安装 (PCL-CE McDownloadForgelikeLoader + MergeJson) ═══
+/// Forge / NeoForge — loader JSON 来自 installer.jar 内的 version.json
+///
+/// 只取 version.json：install_profile.json 里的 libraries 是构建期工具，
+/// 混入运行期 JSON 会污染 classpath。
 async fn install_forgelike_with_vanilla_merge(
     app: &tauri::AppHandle, mc_dir: &Path, instance_name: &str, mc_ver: &str,
     loader_ver: &str, loader_type: &str, client: &reqwest::Client,
 ) -> Result<(), String> {
-    let target = mc_dir.join("versions").join(instance_name);
-    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     let tmp_dir = mc_dir.join(format!(".tmp_{}_{}", loader_type, instance_name));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
@@ -552,75 +551,29 @@ async fn install_forgelike_with_vanilla_merge(
         _ => return Err(format!("不支持的: {}", loader_type)),
     };
 
-    let mut dl = DownloadFile::new(installer_urls, installer_path.clone(), FileChecker::with_min_size(64*1024));
-    download_file(app, &mut dl, false).await?;
+    fetch_single(app, installer_urls, installer_path.clone(), 64 * 1024).await?;
 
-    let archive_file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| e.to_string())?;
-
-    // 读取 version.json (PCL-CE: 仅使用 version.json，profile 的 libs 是构建工具不混入)
-    let read_json = |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| -> Option<serde_json::Value> {
-        let mut entry = archive.by_name(name).ok()?;
+    let loader_json = {
+        let archive_file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| e.to_string())?;
+        let mut entry = archive
+            .by_name("version.json")
+            .map_err(|_| "installer 中无 version.json".to_string())?;
         let mut s = String::new();
-        std::io::Read::read_to_string(&mut entry, &mut s).ok()?;
-        serde_json::from_str(&s).ok()
+        std::io::Read::read_to_string(&mut entry, &mut s).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| serde_json::json!({}))
     };
-    let version_json = read_json(&mut archive, "version.json");
+    log::debug!("[modpack] {} version.json libraries: {}", loader_type,
+        loader_json["libraries"].as_array().map(|a| a.len()).unwrap_or(0));
 
-    let mut forge_runtime = version_json.unwrap_or(serde_json::json!({}));
-    eprintln!("[modpack] Forge version.json libs: {}",
-        forge_runtime["libraries"].as_array().map(|a| a.len()).unwrap_or(0));
+    let vanilla_json = download_vanilla_json_mem(client, mc_ver).await?;
+    let result = merge_and_install(app, mc_dir, instance_name, mc_ver, &loader_json, &vanilla_json).await;
 
-    // PCL MergeJson: 原版为基础，Forge 合入
-    let vanilla_json = download_json_to_memory(client, mc_ver).await?;
-    let mut output = vanilla_json.clone();
-    output.as_object_mut().map(|o| { o.remove("releaseTime"); o.remove("time"); });
-    forge_runtime.as_object_mut().map(|o| { o.remove("releaseTime"); o.remove("time"); });
-
-    // 合并 libraries
-    if let Some(v_libs) = forge_runtime["libraries"].as_array().cloned() {
-        let mut all = output["libraries"].as_array().cloned().unwrap_or_default();
-        let mut seen: std::collections::HashSet<String> = all.iter()
-            .filter_map(|l| l["name"].as_str().map(|s| s.to_string())).collect();
-        for lib in v_libs {
-            if let Some(name) = lib["name"].as_str() {
-                if !seen.contains(name) { seen.insert(name.to_string()); all.push(lib); }
-            }
-        }
-        output["libraries"] = serde_json::Value::Array(all);
-    }
-
-    // Forge 覆盖 mainClass/arguments
-    if let Some(mc) = forge_runtime.get("mainClass").cloned() { output["mainClass"] = mc; }
-    if let Some(args) = forge_runtime.get("arguments").cloned() { output["arguments"] = args; }
-    output.as_object_mut().map(|o| o.remove("inheritsFrom"));
-    output.as_object_mut().map(|o| o.remove("_comment_"));
-    output["id"] = serde_json::Value::String(instance_name.to_string());
-    output["clientVersion"] = serde_json::Value::String(mc_ver.to_string());
-
-    let json_path = target.join(format!("{}.json", instance_name));
-    std::fs::write(&json_path, serde_json::to_string_pretty(&output).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
-    eprintln!("[modpack] Forge 自包含 JSON: {} libraries",
-        output["libraries"].as_array().map(|a| a.len()).unwrap_or(0));
-
-    // 下载 libraries
-    let libs = crate::version::library::mclib_list_from_json(&output, mc_dir);
-    let mut dl_files = crate::version::library::mclib_to_download_files(&libs, false);
-    if let Some(url) = vanilla_json["downloads"]["client"]["url"].as_str() {
-        let jar_path = target.join(format!("{}.jar", instance_name));
-        let urls = crate::download::source::source_launcher_or_meta(url, false);
-        if FileChecker::with_min_size(1024).check(&jar_path).is_some() {
-            dl_files.push(DownloadFile::new(urls, jar_path, FileChecker::with_min_size(1024)));
-        }
-    }
-    if !dl_files.is_empty() {
-        crate::download::engine::download_files_parallel(app, &mut dl_files, 8).await;
-    }
     let _ = std::fs::remove_dir_all(&tmp_dir);
-    Ok(())
+    result
 }
 
+/// 纯原版整合包 — 写轻量 inheritsFrom JSON 指向原版版本
 async fn install_vanilla_direct(
     _app: &tauri::AppHandle, mc_dir: &Path, instance_name: &str, mc_ver: &str, _client: &reqwest::Client,
 ) -> Result<(), String> {
@@ -640,7 +593,7 @@ pub async fn install_local_modpack(
     file_path: String,
     pack_name: String,
 ) -> Result<String, String> {
-    eprintln!("[modpack] install_local: path={}, name={}", file_path, pack_name);
+    log::debug!("[modpack] install_local: path={}, name={}", file_path, pack_name);
     app.emit("download-progress", serde_json::json!({
         "filename": &pack_name, "downloaded": 1, "total": 100, "percent": 1,
         "step": "正在准备..."
@@ -649,23 +602,6 @@ pub async fn install_local_modpack(
     // 使用 file:// 协议传递本地路径
     let local_url = format!("file:///{}", file_path.replace('\\', "/"));
     let result = install_modpack(app.clone(), mc_dir, local_url, String::new(), pack_name, "local".into(), 8).await;
-    eprintln!("[modpack] install_local result: {:?}", result.as_ref().map(|_| "ok").unwrap_or_else(|e| e));
+    log::debug!("[modpack] install_local result: {:?}", result.as_ref().map(|_| "ok").unwrap_or_else(|e| e));
     result
-}
-
-async fn download_json_to_memory(client: &reqwest::Client, mc_ver: &str) -> Result<serde_json::Value, String> {
-    let manifest: serde_json::Value = client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
-        .send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-    let ver_url = manifest["versions"].as_array().ok_or("版本清单为空")?
-        .iter().find(|v| v["id"].as_str() == Some(mc_ver))
-        .and_then(|v| v["url"].as_str()).ok_or(format!("找不到版本 {}", mc_ver))?;
-    let urls = crate::download::source::source_launcher_or_meta(ver_url, false);
-    for url in &urls {
-        if let Ok(resp) = client.get(url).send().await {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if json.get("libraries").is_some() { return Ok(json); }
-            }
-        }
-    }
-    Err(format!("无法下载原版 JSON: {}", mc_ver))
 }

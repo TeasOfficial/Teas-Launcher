@@ -76,7 +76,7 @@ async function deleteInstance(inst: Instance) {
         <div class="inst-card-head" @click="selectInstance(inst)">
           <span class="inst-dot" :class="{ active: inst.active }"></span>
           <span class="inst-name">{{ inst.name }}</span>
-          <span class="inst-ver">{{ inst.loaderName ?? inst.loader }}</span>
+          <span class="inst-ver">{{ inst.loaderName || 'Vanilla' }}</span>
         </div>
         <div class="inst-card-body" @click="selectInstance(inst)">
           <div class="inst-stat">
@@ -85,7 +85,7 @@ async function deleteInstance(inst: Instance) {
           </div>
           <div class="inst-stat">
             <span><span class="bl-zh">加载器</span><span class="bl-en">Loader</span></span>
-            <span>{{ inst.loaderName ?? (inst.loader ? 'Forge' : 'Vanilla') }}</span>
+            <span>{{ inst.loaderName || 'Vanilla' }}</span>
           </div>
           <div class="inst-stat">
             <span><span class="bl-zh">最后游玩</span><span class="bl-en">Last Played</span></span>

@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct McAssetToken {
     pub local_path: PathBuf,
-    #[allow(dead_code)]
-    pub source_path: String,
     pub hash: String,
     pub size: i64,
 }
@@ -141,7 +139,6 @@ pub fn mcassets_list_get(
 
         result.push(McAssetToken {
             local_path,
-            source_path: path.to_string(),
             hash,
             size,
         });

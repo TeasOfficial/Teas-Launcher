@@ -35,18 +35,6 @@ fn source_order(official: Vec<String>, mirror: Vec<String>, prefer_official: boo
     }
 }
 
-/// 是否优先使用官方源 (参照 PCL-CE DlSourcePreferMojang)
-#[allow(dead_code)]
-pub fn prefer_official(file_source: u32, mojang_is_fast: bool) -> bool {
-    file_source == 2 || (file_source == 1 && mojang_is_fast)
-}
-
-/// 是否优先使用官方源获取版本列表 (参照 PCL-CE DlVersionListPreferMojang)
-#[allow(dead_code)]
-pub fn prefer_official_for_list(version_list_source: u32, mojang_is_fast: bool) -> bool {
-    version_list_source == 2 || (version_list_source == 1 && mojang_is_fast)
-}
-
 /// 启动器/Launcher/Meta URL 镜像转换
 ///
 /// 参照 PCL-CE DlSourceLauncherOrMetaGet:
@@ -142,16 +130,6 @@ pub fn source_assets(original: &str, prefer_official: bool) -> Vec<String> {
     source_order(official, mirrors, prefer_official)
 }
 
-/// Mod API/Download 镜像源
-///
-/// 参照 PCL-CE DlSourceModGet (API) + DlSourceModDownloadGet (下载):
-#[allow(dead_code)]
-pub fn source_mod_api(original: &str) -> String {
-    original
-        .replace("https://api.modrinth.com", "https://mod.mcimirror.top/modrinth")
-        .replace("https://api.curseforge.com", "https://mod.mcimirror.top/curseforge")
-}
-
 /// Mod 文件下载源列表 (含回退)
 /// 参照 PCL-CE: comp_source_solution 决定优先级
 pub fn source_mod_download(original: &str, comp_source: u32) -> Vec<String> {
@@ -192,30 +170,6 @@ pub fn source_maven_bmclapi(original: &str) -> String {
     }
 }
 
-/// 源优先级: 官方源优先 → 镜像源接在官方源后面
-/// 镜像源优先 → 官方源接在镜像源后面
-/// 参照 PCL-CE DlSourceOrder()
-#[allow(dead_code)]
-pub fn interleave_sources(official: &[String], mirrors: &[String], prefer_official: bool) -> Vec<String> {
-    let mut result = Vec::new();
-    if prefer_official {
-        result.extend(official.iter().cloned());
-        for m in mirrors {
-            if !result.contains(m) {
-                result.push(m.clone());
-            }
-        }
-    } else {
-        result.extend(mirrors.iter().cloned());
-        for o in official {
-            if !result.contains(o) {
-                result.push(o.clone());
-            }
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,12 +187,5 @@ mod tests {
         let url = "https://resources.download.minecraft.net/ab/abcdef1234567890";
         let urls = source_assets(url, false);
         assert_eq!(urls[0], "https://bmclapi2.bangbang93.com/assets/ab/abcdef1234567890");
-    }
-
-    #[test]
-    fn test_source_mod_api() {
-        let url = "https://api.modrinth.com/v2/projects/test";
-        let result = source_mod_api(url);
-        assert_eq!(result, "https://mod.mcimirror.top/modrinth/v2/projects/test");
     }
 }

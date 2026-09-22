@@ -32,7 +32,7 @@ async fn cf_request(url: &str, body: Option<&serde_json::Value>, method: &str) -
     for (u, timeout, needs_key) in &attempts {
         let client = match build_http_client(Duration::from_secs(*timeout)) {
             Ok(c) => c,
-            Err(e) => { eprintln!("[cf] client build failed: {}", e); last_err = format!("client: {}", e); continue; }
+            Err(e) => { log::warn!("[cf] client build failed: {}", e); last_err = format!("client: {}", e); continue; }
         };
         let mut req = match method {
             "POST" => client.post(*u).header("Content-Type", "application/json"),
@@ -47,12 +47,12 @@ async fn cf_request(url: &str, body: Option<&serde_json::Value>, method: &str) -
         match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
-                eprintln!("[cf] {} -> HTTP {}", u, status.as_u16());
+                log::debug!("[cf] {} -> HTTP {}", u, status.as_u16());
                 let body = match resp.text().await {
                     Ok(t) => t,
-                    Err(e) => { eprintln!("[cf] {} text() error: {}", u, e); String::new() }
+                    Err(e) => { log::warn!("[cf] {} text() error: {}", u, e); String::new() }
                 };
-                eprintln!("[cf] {} body len={}", u, body.len());
+                log::debug!("[cf] {} body len={}", u, body.len());
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                     if json["data"].is_array() || json["data"].is_object() {
                         return Ok(json);
@@ -63,12 +63,12 @@ async fn cf_request(url: &str, body: Option<&serde_json::Value>, method: &str) -
                 }
             }
             Err(e) => {
-                eprintln!("[cf] {} HTTP error: {}", u, e);
+                log::warn!("[cf] {} HTTP error: {}", u, e);
                 last_err = format!("{}: {}", u, e);
             }
         }
     }
-    eprintln!("[cf] all attempts failed: {}", last_err);
+    log::error!("[cf] all attempts failed: {}", last_err);
     Err(last_err)
 }
 
@@ -126,6 +126,8 @@ pub(crate) async fn install_curseforge_file(
     let base = std::path::Path::new(&mc_dir);
     let dm = if base.join(".minecraft").exists() { base.join(".minecraft") } else { base.to_path_buf() };
     let vd = dm.join("versions").join(&instance_name);
+    // source 参数预留（镜像源切换）
+    let _ = &source;
     let game_dir = if !instance_name.is_empty() && vd.exists() { &vd } else { &dm };
     let td = match project_type.as_str() {
         "mod" => game_dir.join("mods"),

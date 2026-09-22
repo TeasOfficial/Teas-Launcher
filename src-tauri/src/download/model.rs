@@ -9,7 +9,11 @@
 //! 参照 PCL-CE:
 //! - ModBase.FileChecker(canUseExistsFile, minSize, actualSize, hash, isJson)
 //! - DownloadFile(urls, localPath, checker)
-//! 完整移植 PCL-CE 模型，部分变体/方法前端暂未使用
+//!
+//! 本文件是 PCL-CE 模型的完整移植：FileChecker 四层校验与 DownloadState 状态机
+//! 保持完整，即使当前仅有部分变体/构造器被调用方使用。新增下载场景时无需回头补 API。
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -22,10 +26,8 @@ pub enum DownloadState {
     /// 正在连接
     Connecting,
     /// 读取响应头
-    #[allow(dead_code)]
     Reading,
     /// 正在下载
-    #[allow(dead_code)]
     Downloading,
     /// 下载完成，等待校验
     Verifying,
@@ -39,7 +41,6 @@ pub enum DownloadState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HashAlgo {
     Sha1,
-    #[allow(dead_code)]
     Md5,
 }
 
@@ -96,7 +97,6 @@ impl FileChecker {
     }
 
     /// PCL-CE 风格: 带 JSON 标记
-    #[allow(dead_code)]
     pub fn with_json(mut self, is_json: bool) -> Self {
         self.is_json = is_json;
         self
@@ -224,7 +224,6 @@ pub struct DownloadFile {
     /// 活跃线程数
     pub active_threads: u32,
     /// 发生错误时记录
-    #[allow(dead_code)]
     pub errors: Vec<String>,
     /// 完成时间
     pub finish_time: Option<Instant>,
@@ -250,27 +249,23 @@ impl DownloadFile {
     }
 
     /// 从单个 URL 创建
-    #[allow(dead_code)]
     pub fn from_url(url: String, local_path: PathBuf, check: FileChecker) -> Self {
         Self::new(vec![url], local_path, check)
     }
 
     /// 设置浏览器 UA
-    #[allow(dead_code)]
     pub fn with_browser_ua(mut self) -> Self {
         self.use_browser_ua = true;
         self
     }
 
     /// 设置自定义 UA
-    #[allow(dead_code)]
     pub fn with_custom_ua(mut self, ua: String) -> Self {
         self.custom_ua = Some(ua);
         self
     }
 
     /// 下载进度 (0.0 ~ 1.0)
-    #[allow(dead_code)]
     pub fn progress(&self) -> f64 {
         if self.total_size > 0 {
             (self.downloaded as f64 / self.total_size as f64).min(1.0)

@@ -91,3 +91,28 @@ logs/
 *.zip
 *.tar.gz
 *.rar
+
+# ════════════ 启动器运行时产物 ════════════
+# 便携版发行目录。Release 模式下 teas_dir() / get_minecraft_dir() 都取 exe 所在目录，
+# 所以从这里运行启动器会在同目录生成 .teas/、versions/、libraries/、assets/，
+# 堆积上百 MB 的 Minecraft 资源库 (assets/objects 下是哈希命名的 jar/ogg/资源文件)。
+# 这些是构建产物 + 可重新下载的游戏数据，不是源码。
+/release/
+
+# 启动器自身数据 (tc.ini、launcher.log)
+.teas/
+
+# 下载中断残留 (download/engine.rs 以 .dlpart 作为临时后缀)
+*.dlpart
+
+# 若直接从仓库根目录运行 release 版 exe，启动器会把 Minecraft 目录结构
+# 建在这里。全部加 "/" 前缀锚定根目录，避免误伤 src/assets/ 等源码目录。
+/versions/
+/libraries/
+/assets/
+/teas-latest-launch.bat
+/.tmp_*.zip
+/.tmp_*/
+
+# ════════════ 工具 ════════════
+.reasonix/

@@ -55,7 +55,7 @@ pub async fn install_forge_loader(
     );
 
     download_file(app, &mut installer_dl, false).await?;
-    eprintln!("[forge] installer.jar 已下载");
+    log::debug!("[forge] installer.jar 已下载");
 
     // 2) 解压并读取 install_profile.json
     let archive_file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
@@ -141,7 +141,7 @@ async fn install_forge_new(
     }
 
     // 3) 提取内嵌 Maven 库
-    extract_embedded_libs(archive, mc_dir);
+    extract_embedded_maven(archive, mc_dir);
 
     // 4) 保存合并后的 version JSON
     let target = mc_dir.join("versions").join(instance_name);
@@ -155,39 +155,40 @@ async fn install_forge_new(
     // 5) 尝试运行 Forge installer Java 进程
     // PCL-CE 用了 JavaWrapper来处理中文路径，这里简化：尝试直接运行
     if let Err(e) = run_forge_installer(mc_dir, tmp_dir, mc_version, forge_version).await {
-        eprintln!("[forge] 运行 Forge installer 失败 (非致命): {}", e);
+        log::warn!("[forge] 运行 Forge installer 失败 (非致命): {}", e);
     }
 
     // 清理
     let _ = std::fs::remove_dir_all(tmp_dir);
-    eprintln!("[forge] 新版 Forge 安装完成: {}-forge-{}", mc_version, forge_version);
+    log::info!("[forge] 新版 Forge 安装完成: {}-forge-{}", mc_version, forge_version);
     Ok(())
 }
 
-/// 提取 JAR 内嵌的 Maven 库
-fn extract_embedded_libs(
-    archive: &mut zip::ZipArchive<std::fs::File>,
-    mc_dir: &Path,
-) {
+/// 提取 installer JAR 内嵌的 Maven 库到 libraries/
+///
+/// installer 会把部分库直接打包在 `maven/` 目录下，这些文件不在 version JSON 的
+/// libraries 列表里，必须单独解出来，否则启动时找不到类。
+fn extract_embedded_maven(archive: &mut zip::ZipArchive<std::fs::File>, mc_dir: &Path) {
     let libs_dir = mc_dir.join("libraries");
-    let maven_entries: Vec<(String, std::path::PathBuf)> = {
-        let mut entries = Vec::new();
+
+    // 先收集再解压：borrow checker 不允许在遍历 archive 时同时 by_name 取内容
+    let entries: Vec<(String, std::path::PathBuf)> = {
+        let mut result = Vec::new();
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i) {
                 let name = entry.name().to_string();
                 if name.starts_with("maven/") && !name.ends_with('/') {
-                    let rel = name.trim_start_matches("maven/");
-                    let dest = libs_dir.join(rel);
+                    let dest = libs_dir.join(name.trim_start_matches("maven/"));
                     if !dest.exists() {
-                        entries.push((name, dest));
+                        result.push((name, dest));
                     }
                 }
             }
         }
-        entries
+        result
     };
 
-    for (name, dest) in maven_entries {
+    for (name, dest) in entries {
         if let Some(p) = dest.parent() {
             let _ = std::fs::create_dir_all(p);
         }
@@ -229,11 +230,11 @@ async fn run_forge_installer(
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     if !output.status.success() {
-        eprintln!("[forge] installer stderr:\n{}", stderr);
+        log::debug!("[forge] installer stderr:\n{}", stderr);
         return Err(format!("Forge installer 失败: {}", stderr.lines().last().unwrap_or("")));
     }
 
-    eprintln!("[forge] installer stdout:\n{}", stdout);
+    log::debug!("[forge] installer stdout:\n{}", stdout);
     Ok(())
 }
 
@@ -310,44 +311,10 @@ fn install_forge_legacy(
         }
 
         // 解压 maven/ 目录
-        let _unrar_dir = tmp_dir.join("_unrar");
-        extract_maven_dir(archive, mc_dir);
+        extract_embedded_maven(archive, mc_dir);
     }
 
     let _ = std::fs::remove_dir_all(tmp_dir);
-    eprintln!("[forge] 旧版 Forge 安装完成: {}-forge-{}", mc_version, forge_version);
+    log::info!("[forge] 旧版 Forge 安装完成: {}-forge-{}", mc_version, forge_version);
     Ok(())
-}
-
-fn extract_maven_dir(
-    archive: &mut zip::ZipArchive<std::fs::File>,
-    mc_dir: &Path,
-) {
-    let entries: Vec<(String, std::path::PathBuf)> = {
-        let mut result = Vec::new();
-        for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i) {
-                let name = entry.name().to_string();
-                if name.starts_with("maven/") && !name.ends_with('/') {
-                    let rel = name.trim_start_matches("maven/");
-                    let dest = mc_dir.join("libraries").join(rel);
-                    if !dest.exists() {
-                        result.push((name, dest));
-                    }
-                }
-            }
-        }
-        result
-    };
-
-    for (name, dest) in entries {
-        if let Some(p) = dest.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        if let Ok(mut e) = archive.by_name(&name) {
-            if let Ok(mut out) = std::fs::File::create(&dest) {
-                let _ = std::io::copy(&mut e, &mut out);
-            }
-        }
-    }
 }

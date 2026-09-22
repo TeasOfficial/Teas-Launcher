@@ -435,7 +435,7 @@ pub fn mclib_to_download_files(
 
         // 跳过本地文件
         if token.is_local {
-            eprintln!("[lib] 跳过本地文件: {}", token.original_name);
+            log::debug!("[lib] 跳过本地文件: {}", token.original_name);
             continue;
         }
 
@@ -507,20 +507,6 @@ pub fn mclib_from_instance(
         .and_then(|c| c.get("url"))
         .and_then(|u| u.as_str())
     {
-        let sha1 = json
-            .get("downloads")
-            .and_then(|d| d.get("client"))
-            .and_then(|c| c.get("sha1"))
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string());
-
-        let size = json
-            .get("downloads")
-            .and_then(|d| d.get("client"))
-            .and_then(|c| c.get("size"))
-            .and_then(|s| s.as_i64())
-            .unwrap_or(-1);
-
         let instance_name = json
             .get("id")
             .and_then(|v| v.as_str())
@@ -531,7 +517,11 @@ pub fn mclib_from_instance(
             .join(instance_name)
             .join(format!("{}.jar", instance_name));
 
-        let checker = FileChecker::new(1024, size, sha1);
+        // 主 JAR 校验: PCL-CE DlClientJarGet 行为 — 存在且大小合理即视为 OK。
+        // ★ 不能用 downloads.client 的 sha1/精确大小校验：不同启动器安装的加载器
+        // 实例，其主 jar 可能是特制 jar（如 HMCL 合并后的 jar，sha1 与 vanilla 不同），
+        // 精确校验会误判为损坏 → 下载 vanilla jar 覆盖主 jar → 实例被破坏
+        let checker = FileChecker::with_min_size(1024);
         if checker.check(&jar_path).is_some() {
             let jar_urls: Vec<String> = if prefer_official {
                 vec![
