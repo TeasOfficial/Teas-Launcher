@@ -13,6 +13,16 @@ export default defineConfig(async () => ({
     hmr: host
       ? { protocol: "ws", host, port: 1421 }
       : undefined,
-    watch: { ignored: ["**/src-tauri/**"] },
+    // 本仓库是 Cargo workspace，target/ 在仓库根目录（不在 src-tauri 下）。
+    // 只忽略 src-tauri 的话，Vite 会去 watch target/**/*.exe，cargo 一重写就 EBUSY 崩掉。
+    watch: {
+      ignored: [
+        "**/src-tauri/**",
+        "**/target/**",
+        "**/dist/**",
+        "**/release/**",
+        "**/.teas/**",
+      ],
+    },
   },
 }));

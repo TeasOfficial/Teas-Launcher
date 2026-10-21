@@ -9,7 +9,8 @@
 import { ref, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { versionCmp } from "../utils/version";
-import { gameSourceParam, readUserConfig } from "../utils/source";
+import { gameSourceParam } from "../utils/source";
+import { readUserConfig } from "../utils/config";
 
 export interface LoaderOption {
   id: string;
@@ -36,6 +37,11 @@ export interface GameInstallDeps {
   finishDlTask: (id: number, error?: string) => void;
   /** 页面级提示文案，由向导写入 */
   installMsg: Ref<string>;
+  /**
+   * 安装成功后刷新全局实例列表（App.vue provide 的 instances）。
+   * 不刷新的话新装的版本要重启启动器才会出现在实例页。
+   */
+  refreshInstances?: () => Promise<void>;
 }
 
 export const GAME_VERSION_GROUPS = [
@@ -54,7 +60,7 @@ export const LOADER_OPTIONS: LoaderOption[] = [
 ];
 
 export function useGameInstall(deps: GameInstallDeps) {
-  const { addDlTask, updateDlTask, finishDlTask, installMsg } = deps;
+  const { addDlTask, updateDlTask, finishDlTask, installMsg, refreshInstances } = deps;
 
   // ── 原版版本列表展开 ──
   const gameVersions = GAME_VERSION_GROUPS;
@@ -200,7 +206,7 @@ export function useGameInstall(deps: GameInstallDeps) {
     if (!selectedLoader.value) return selectedGameVer.value;
     const loader = LOADER_OPTIONS.find(l => l.id === selectedLoader.value);
     const base = loader ? `${selectedGameVer.value}-${loader.en}` : selectedGameVer.value;
-    return selectedLoaderVer.value ? `${base} ${selectedLoaderVer.value}` : base;
+    return selectedLoaderVer.value ? `${base}_${selectedLoaderVer.value}` : base;
   }
 
   async function doInstallGame() {
@@ -235,6 +241,8 @@ export function useGameInstall(deps: GameInstallDeps) {
         }
       }, 5000);
     }
+    // 新实例要立刻出现在实例页/仪表盘（失败时不动列表）
+    if (success) await refreshInstances?.();
     closeGameInstall();
   }
 

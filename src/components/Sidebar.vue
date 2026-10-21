@@ -10,14 +10,16 @@ const emit = defineEmits<{ navigate: [page: string] }>();
 const dlTasks = inject<Ref<DownloadTask[]>>("dlTasks", ref([]) as any);
 const dlCount = computed(() => dlTasks.value.length);
 
-const navItems = [
-  { id: "dashboard", zh: "仪表盘", en: "DASHBOARD" },
-  { id: "instances", zh: "实例列表", en: "INSTANCES" },
-  { id: "dlTasks", zh: "任务列表", en: "TASKS", badge: dlCount },
-  { id: "downloads", zh: "获取内容", en: "BROWSE" },
-  { id: "accounts", zh: "账户管理", en: "ACCOUNTS" },
-  { id: "settings", zh: "设置", en: "SETTINGS" },
-];
+// badge 必须是普通数字：早先直接放 dlCount（ComputedRef）进数组，模板里 item.badge > 0
+// 实际比较的是对象，角标永远不显示。用 computed 解包。
+const navItems = computed(() => [
+  { id: "dashboard", zh: "仪表盘", en: "DASHBOARD", badge: 0 },
+  { id: "instances", zh: "实例列表", en: "INSTANCES", badge: 0 },
+  { id: "dlTasks", zh: "任务列表", en: "TASKS", badge: dlCount.value },
+  { id: "downloads", zh: "获取内容", en: "BROWSE", badge: 0 },
+  { id: "accounts", zh: "账户管理", en: "ACCOUNTS", badge: 0 },
+  { id: "settings", zh: "设置", en: "SETTINGS", badge: 0 },
+]);
 
 const netLevel = ref<"ok" | "warn" | "err">("ok");
 const netZh = ref("系统正常");

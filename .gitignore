@@ -116,3 +116,15 @@ logs/
 
 # ════════════ 工具 ════════════
 .reasonix/
+
+# UI 审查截图（脚本: scripts/capture-window.ps1，清单: UI-REVIEW.md）
+/.review/
+
+# ════════════ 密钥（绝不入库） ════════════
+# CurseForge API Key 存于 %APPDATA%\TeasLauncher\curseforge.key
+*.key
+/curseforge.key
+/.env
+
+# 工具临时目录
+/.dsh-tmp/

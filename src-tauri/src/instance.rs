@@ -1,7 +1,6 @@
 //! 实例管理：解析版本、列表、删除、修复
 
 use crate::utils::detect_loader;
-use tauri::Emitter;
 
 /// HMCL-style: 解析版本 JSON 并合并 inheritsFrom 父版本的数据
 ///
@@ -216,6 +215,15 @@ fn detect_mc_version(version_dir: &std::path::Path, instance_name: &str) -> Opti
 }
 
 /// 修复实例 — 补全缺失文件
+/// 在系统文件管理器里打开实例目录（版本隔离下是 versions/<name>）
+#[tauri::command]
+pub(crate) fn open_instance_folder(mc_dir: String, instance_name: String) -> Result<(), String> {
+    let dot = crate::utils::dot_minecraft(&mc_dir);
+    let dir = crate::utils::instance_game_dir(&dot, &instance_name);
+    let dir = if dir.exists() { dir } else { dot.clone() };
+    tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn fix_instance(
     app: tauri::AppHandle,
@@ -223,12 +231,7 @@ pub(crate) async fn fix_instance(
     instance_name: String,
     source: String,
 ) -> Result<String, String> {
-    let base = std::path::Path::new(&mc_dir);
-    let dot_minecraft = if base.join(".minecraft").exists() {
-        base.join(".minecraft")
-    } else {
-        base.to_path_buf()
-    };
+    let dot_minecraft = crate::utils::dot_minecraft(&mc_dir);
     let prefer_official = source == "Mojang";
 
     // ★ 修复取消粘滞: 之前用户取消过下载会导致 CANCEL_DOWNLOAD 永久为 true
@@ -241,11 +244,12 @@ pub(crate) async fn fix_instance(
     // 1) 下载缺失的库文件
     let libs = crate::version::library::mclib_from_instance(&version, &dot_minecraft, prefer_official);
     if !libs.is_empty() {
-        app.emit("download-progress", serde_json::json!({
-            "filename": &instance_name,
-            "downloaded": 0, "total": libs.len(), "percent": 0,
-            "step": format!("修复实例: 下载 {} 个库文件...", libs.len())
-        })).ok();
+        crate::progress::emit_stage(
+            &app,
+            &instance_name,
+            0,
+            &format!("修复实例: 下载 {} 个库文件...", libs.len()),
+        );
         let mut files = libs;
         let result = crate::download::engine::download_files_parallel(&app, &mut files, 8).await;
         fixed += result.success as u32;
@@ -257,11 +261,12 @@ pub(crate) async fn fix_instance(
         &dot_minecraft, &index_name, true, prefer_official
     ) {
         if !assets.is_empty() {
-            app.emit("download-progress", serde_json::json!({
-                "filename": &instance_name,
-                "downloaded": 0, "total": assets.len(), "percent": 0,
-                "step": format!("修复实例: 下载 {} 个资源文件...", assets.len())
-            })).ok();
+            crate::progress::emit_stage(
+                &app,
+                &instance_name,
+                0,
+                &format!("修复实例: 下载 {} 个资源文件...", assets.len()),
+            );
             let mut files = assets;
             let result = crate::download::engine::download_files_parallel(&app, &mut files, 8).await;
             fixed += result.success as u32;
@@ -294,12 +299,7 @@ fn format_last_played(mtime_secs: u64) -> String {
 /// 仅对目录 mtime 发生变化的实例重新扫描，其余从缓存读取。
 #[tauri::command]
 pub(crate) fn list_instances(mc_dir: String) -> Result<Vec<serde_json::Value>, String> {
-    let base = std::path::Path::new(&mc_dir);
-    let dot_minecraft = if base.join(".minecraft").exists() {
-        base.join(".minecraft")
-    } else {
-        base.to_path_buf()
-    };
+    let dot_minecraft = crate::utils::dot_minecraft(&mc_dir);
     let versions_dir = dot_minecraft.join("versions");
     if !versions_dir.exists() {
         return Ok(Vec::new());
@@ -467,15 +467,256 @@ pub(crate) fn delete_instance(
     mc_dir: String,
     instance_name: String,
 ) -> Result<(), String> {
-    let base = std::path::Path::new(&mc_dir);
-    let dot_minecraft = if base.join(".minecraft").exists() {
-        base.join(".minecraft")
-    } else {
-        base.to_path_buf()
-    };
+    let dot_minecraft = crate::utils::dot_minecraft(&mc_dir);
     let version_dir = dot_minecraft.join("versions").join(&instance_name);
     if !version_dir.exists() {
         return Err(format!("实例目录不存在: {}", version_dir.display()));
     }
     std::fs::remove_dir_all(&version_dir).map_err(|e| format!("删除失败: {}", e))
+}
+
+// ── 实例级设置 ────────────────────────────────
+
+/// 实例配置文件。只存用户显式覆盖的字段，缺字段 = 跟随全局（用户级 tc.ini）。
+///
+/// 放在实例目录里而不是集中一个文件，是为了让配置跟着实例走：复制/移动实例时设置
+/// 一起过去，删除实例时自动消失，也不会留下指向已删实例的孤儿条目。
+fn instance_cfg_path(mc_dir: &str, instance_name: &str) -> std::path::PathBuf {
+    crate::utils::dot_minecraft(mc_dir)
+        .join("versions")
+        .join(instance_name)
+        .join("teas-instance.json")
+}
+
+/// 读取实例覆盖配置（无文件时返回空对象，即全部跟随全局）
+#[tauri::command]
+pub(crate) fn instance_config_read(
+    mc_dir: String,
+    instance_name: String,
+) -> Result<serde_json::Value, String> {
+    let path = instance_cfg_path(&mc_dir, &instance_name);
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    match serde_json::from_str(&raw) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // 配置损坏时不要连带把实例弄成不可用：报错但让上层仍能拿到空配置
+            log::warn!("[instance] 实例配置解析失败 {}: {}", path.display(), e);
+            Err(format!("实例配置解析失败: {}", e))
+        }
+    }
+}
+
+/// 写入单个实例覆盖项。`value` 传 null 表示删除该项（回到跟随全局）。
+#[tauri::command]
+pub(crate) fn instance_config_write(
+    mc_dir: String,
+    instance_name: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let version_dir = crate::utils::dot_minecraft(&mc_dir).join("versions").join(&instance_name);
+    // 不存在的实例不要凭空虚建目录
+    if !version_dir.is_dir() {
+        return Err(format!("实例目录不存在: {}", version_dir.display()));
+    }
+    let path = version_dir.join("teas-instance.json");
+
+    let mut cfg: serde_json::Value = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(obj) = cfg.as_object_mut() {
+        if value.is_null() {
+            obj.remove(&key);
+        } else {
+            // key 后面还要用于日志，这里 clone
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+
+    // 覆盖项清空后别留一个空文件
+    if cfg.as_object().map_or(true, |o| o.is_empty()) {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+        log::info!("[instance] {} 已无覆盖项，移除 {}", instance_name, path.display());
+        return Ok(());
+    }
+
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    log::info!("[instance] 写入实例配置 {}: {} = {}", instance_name, key, value);
+    Ok(())
+}
+
+#[cfg(test)]
+mod instance_cfg_tests {
+    use super::*;
+
+    /// 建一个临时游戏目录 + 一个空实例目录，返回 (游戏目录, 实例名)
+    ///
+    /// 不用 tempfile：为一个测试引入 dev-dependency 会让 Cargo.lock 变动。
+    fn temp_mc(tag: &str) -> (std::path::PathBuf, String) {
+        let base = std::env::temp_dir()
+            .join(format!("teas-instcfg-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&base);
+        let inst = "测试实例".to_string();
+        std::fs::create_dir_all(base.join("versions").join(&inst)).unwrap();
+        (base, inst)
+    }
+
+    fn cleanup(base: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let (base, inst) = temp_mc("rw");
+        let mc = base.display().to_string();
+
+        instance_config_write(
+            mc.clone(), inst.clone(),
+            "max_memory".into(), serde_json::json!("8192 MB"),
+        ).unwrap();
+        instance_config_write(
+            mc.clone(), inst.clone(),
+            "java_path".into(), serde_json::json!("C:/jdk-8/bin/javaw.exe"),
+        ).unwrap();
+
+        let cfg = instance_config_read(mc, inst).unwrap();
+        assert_eq!(cfg["max_memory"], "8192 MB");
+        assert_eq!(cfg["java_path"], "C:/jdk-8/bin/javaw.exe");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn write_preserves_other_keys() {
+        let (base, inst) = temp_mc("keep");
+        let mc = base.display().to_string();
+
+        instance_config_write(
+            mc.clone(), inst.clone(), "jvm_args".into(), serde_json::json!("-XX:+UseZGC"),
+        ).unwrap();
+        instance_config_write(
+            mc.clone(), inst.clone(), "window_width".into(), serde_json::json!("1280"),
+        ).unwrap();
+
+        let cfg = instance_config_read(mc, inst).unwrap();
+        assert_eq!(cfg["jvm_args"], "-XX:+UseZGC", "后写入的字段不应覆盖已有字段");
+        assert_eq!(cfg["window_width"], "1280");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn null_removes_override_and_deletes_empty_file() {
+        let (base, inst) = temp_mc("null");
+        let mc = base.display().to_string();
+
+        instance_config_write(
+            mc.clone(), inst.clone(), "jvm_args".into(), serde_json::json!("-XX:+UseZGC"),
+        ).unwrap();
+        assert!(instance_cfg_path(&mc, &inst).exists());
+
+        // null = 取消覆盖，回到跟随全局
+        instance_config_write(
+            mc.clone(), inst.clone(), "jvm_args".into(), serde_json::Value::Null,
+        ).unwrap();
+
+        assert!(
+            !instance_cfg_path(&mc, &inst).exists(),
+            "覆盖项清空后不应留下空配置文件"
+        );
+        assert_eq!(
+            instance_config_read(mc, inst).unwrap(),
+            serde_json::json!({}),
+        );
+        cleanup(&base);
+    }
+
+    #[test]
+    fn null_keeps_file_when_other_overrides_remain() {
+        let (base, inst) = temp_mc("null-keep");
+        let mc = base.display().to_string();
+
+        instance_config_write(
+            mc.clone(), inst.clone(), "a_key".into(), serde_json::json!("A"),
+        ).unwrap();
+        instance_config_write(
+            mc.clone(), inst.clone(), "b_key".into(), serde_json::json!("B"),
+        ).unwrap();
+        instance_config_write(
+            mc.clone(), inst.clone(), "a_key".into(), serde_json::Value::Null,
+        ).unwrap();
+
+        let cfg = instance_config_read(mc, inst).unwrap();
+        assert_eq!(cfg["b_key"], "B");
+        assert!(cfg.get("a_key").is_none());
+        cleanup(&base);
+    }
+
+    #[test]
+    fn missing_file_reads_as_empty_without_creating() {
+        let (base, inst) = temp_mc("missing");
+        let mc = base.display().to_string();
+
+        assert_eq!(
+            instance_config_read(mc.clone(), inst.clone()).unwrap(),
+            serde_json::json!({}),
+        );
+        assert!(!instance_cfg_path(&mc, &inst).exists(), "读取不应写文件");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn write_to_unknown_instance_fails_without_creating_dir() {
+        let (base, _) = temp_mc("ghost");
+        let mc = base.display().to_string();
+        let ghost = "根本没有这个实例".to_string();
+
+        let r = instance_config_write(
+            mc.clone(), ghost.clone(), "max_memory".into(), serde_json::json!("1G"),
+        );
+
+        assert!(r.is_err(), "写入不存在的实例应当报错");
+        assert!(
+            !base.join("versions").join(&ghost).exists(),
+            "不应凭空虚建实例目录"
+        );
+        cleanup(&base);
+    }
+
+    #[test]
+    fn resolves_dot_minecraft_subdir_layout() {
+        let (base, inst) = temp_mc("nested");
+        // 改成 <base>/.minecraft/versions/<inst> 的嵌套布局
+        let nested = base.join(".minecraft");
+        std::fs::create_dir_all(nested.join("versions")).unwrap();
+        std::fs::rename(
+            base.join("versions").join(&inst),
+            nested.join("versions").join(&inst),
+        ).unwrap();
+        let mc = base.display().to_string();
+
+        instance_config_write(
+            mc.clone(), inst.clone(), "max_memory".into(), serde_json::json!("2G"),
+        ).unwrap();
+
+        assert!(
+            nested.join("versions").join(&inst).join("teas-instance.json").exists(),
+            "嵌套布局下应写进 .minecraft/versions/<实例>/"
+        );
+        assert_eq!(instance_config_read(mc, inst).unwrap()["max_memory"], "2G");
+        cleanup(&base);
+    }
 }

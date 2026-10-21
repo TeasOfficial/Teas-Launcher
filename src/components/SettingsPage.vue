@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { readUserConfig, writeUserConfig } from "../utils/config";
 
 const activeTab = ref("general");
 const buildVer = ref("");
@@ -14,13 +15,9 @@ const tabs = [
   ];
   const cfg = ref<Record<string, any>>({});
 
-async function save(key: string, value: any) {
-  try {
-    await invoke("config_write", { scope: "user", key, value });
-    console.log("[config] saved", key, "=", value);
-  } catch (e) {
-    console.error("[config] save failed:", key, e);
-  }
+// 保存失败已在 utils/config 里 warn，不阻塞 UI
+function save(key: string, value: any) {
+  void writeUserConfig(key, value);
 }
 
 const windowPresets = [
@@ -31,6 +28,10 @@ const windowPresets = [
 ];
 const windowPreset = ref("854 × 480 (默认)");
 const presetOpen = ref(false);
+
+// 模板里不能直接调用 setTimeout（会被解析成组件属性 → 运行时 TypeError），包一层
+function closePresetSoon() { window.setTimeout(() => { presetOpen.value = false; }, 150); }
+function closeJavaSoon() { window.setTimeout(() => { javaOpen.value = false; }, 150); }
 
 // ── 内存滑块 (HMCL-style) ──
 const memSliderMin = 512;  // 512 MB
@@ -137,8 +138,7 @@ async function pickCustomJava() {
 onMounted(async () => {
   try {
     buildVer.value = await invoke<string>("get_full_version");
-  cfg.value = await invoke("config_read", { scope: "user" });
-  console.log("[config] loaded", JSON.stringify(cfg.value).slice(0, 200));
+    cfg.value = await readUserConfig();
   } catch (e) {
     console.error("[config] load failed:", e);
   }
@@ -168,18 +168,14 @@ onMounted(async () => {
   proxyPass.value = cfg.value.proxy_pass || "";
   scanStrategy.value = cfg.value.jar_scan_strategy || "B";
   gameSource.value = cfg.value.game_source || "官方源";
-  modSource.value = cfg.value.mod_source || "MCIMirror";
   dlThreads.value = cfg.value.dl_threads || "8";
   scanJava();
 });
 
 const gameSources = ["官方源", "BMCLAPI"];
-const modSources = ["官方源", "MCIMirror"];
 const gameSource = ref(cfg.value.game_source || "官方源");
-const modSource = ref(cfg.value.mod_source || "MCIMirror");
 
 function saveGameSource(v: string) { gameSource.value = v; save("game_source", v); }
-function saveModSource(v: string) { modSource.value = v; save("mod_source", v); }
 
 const dlThreads = ref(cfg.value.dl_threads || "8");
 
@@ -321,7 +317,7 @@ function onCustomWH(which: string, e: any) {
             <span class="bl-en">Resolution</span>
           </span>
           <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-            <div class="custom-select" @click="presetOpen = !presetOpen" @blur="setTimeout(() => presetOpen = false, 150)">
+            <div class="custom-select" @click="presetOpen = !presetOpen" @blur="closePresetSoon">
               <span class="set-select-val">{{ windowPreset }}</span>
               <span class="set-select-arrow" :class="{ open: presetOpen }">▾</span>
               <Transition name="drop">
@@ -400,7 +396,7 @@ function onCustomWH(which: string, e: any) {
             <span class="bl-en">Java Path</span>
           </span>
           <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-            <div class="custom-select" @click="javaOpen = !javaOpen" @blur="setTimeout(() => javaOpen = false, 150)">
+            <div class="custom-select" @click="javaOpen = !javaOpen" @blur="closeJavaSoon">
               <span class="set-select-val" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ javaVal }}</span>
               <span class="set-select-arrow" :class="{ open: javaOpen }">▾</span>
               <Transition name="drop">
@@ -494,20 +490,9 @@ function onCustomWH(which: string, e: any) {
       <div class="settings-grid" v-else-if="activeTab === 'advanced'" key="advanced">
         <!-- 游戏下载源 -->
         <div class="set-item">
-          <span class="set-label"><span class="bl-zh">游戏下载源</span><span class="bl-en">Game Source</span></span>
+          <span class="set-label"><span class="bl-zh">游戏下载源</span><span class="bl-en">Game Source</span><span class="set-hint" title="默认使用官方源；国内网络慢时可切到 BMCLAPI 镜像。Mod / 整合包固定走官方源（MCIMirror 已停止运营）。">?</span></span>
           <div class="toggle-group">
             <button v-for="s in gameSources" :key="s" :class="['toggle-btn', { active: gameSource === s }]" @click="saveGameSource(s)">{{ s }}</button>
-          </div>
-        </div>
-        <!-- 资源下载源 -->
-        <div class="set-item">
-          <span class="set-label" style="position:relative">
-            <span class="bl-zh">资源下载源</span>
-            <span class="bl-en">Mod Source</span>
-            <span class="set-hint" title="CurseForge 官方源在中国大陆无法访问，建议使用镜像源（MCIMirror）。整合包安装已强制使用镜像。">?</span>
-          </span>
-          <div class="toggle-group">
-            <button v-for="s in modSources" :key="s" :class="['toggle-btn', { active: modSource === s }]" @click="saveModSource(s)">{{ s }}</button>
           </div>
         </div>
 

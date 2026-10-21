@@ -54,6 +54,34 @@ pub async fn fetch_version_manifest() -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+
+/// 版本号 → 版本 JSON URL（从 Mojang 版本清单解析）
+///
+/// install/vanilla、install/merge、launch 都需要这一步，此前各自请求了一遍
+/// 同一份清单（三份同样的解析代码）。
+pub(crate) async fn resolve_version_url(
+    client: &reqwest::Client,
+    mc_version: &str,
+) -> Result<String, String> {
+    let manifest: serde_json::Value = client
+        .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+        .send()
+        .await
+        .map_err(|e| format!("获取版本清单失败: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("解析版本清单失败: {}", e))?;
+
+    manifest["versions"]
+        .as_array()
+        .ok_or_else(|| "版本清单为空".to_string())?
+        .iter()
+        .find(|v| v["id"].as_str() == Some(mc_version))
+        .and_then(|v| v["url"].as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("找不到版本 {}", mc_version))
+}
+
 /// Forge Minecraft 版本列表 (哪些 MC 版本有 Forge)
 ///
 /// 参照 PCL-CE DlForgeListMain:

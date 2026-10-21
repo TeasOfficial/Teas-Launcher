@@ -641,8 +641,8 @@
             libs.push(gson);
         }
         let cp = build_classpath(&ctx, &v);
-        // gson 路径只出现一次
-        let gson_count = cp.iter().filter(|p| p.ends_with("gson-2.10.1.jar")).count();
+        // 同一坐标只出现一次（fixture 里的 NeoForge 坐标带 @jar 后缀，也要算同一个库）
+        let gson_count = cp.iter().filter(|p| p.contains("gson-2.10.1")).count();
         assert_eq!(gson_count, 1, "重复库未去重: {:?}", cp);
         // 整体无重复
         let mut seen = std::collections::HashSet::new();
@@ -651,7 +651,24 @@
         }
     }
 
-    // ── 集成: resolve_version 合并（Fabric 差异式 JSON + 父 vanilla）──
+
+    #[test]
+    fn classpath_keeps_single_version_per_coordinate() {
+        // 回归（Fabric 启动崩溃）: 整合包常同时带 asm 9.6 与 9.8，
+        // 两条都进 classpath 时 Fabric Loader 抛
+        // "duplicate ASM classes found on classpath"。
+        let ctx = test_ctx("neoforge-21.1.60");
+        let mut v = fixture("neoforge-21.1.60.json");
+        if let Some(libs) = v["libraries"].as_array_mut() {
+            for ver in ["9.6", "9.8"] {
+                libs.push(serde_json::json!({ "name": format!("org.ow2.asm:asm:{}", ver) }));
+            }
+        }
+        let cp = build_classpath(&ctx, &v);
+        let asm: Vec<&String> = cp.iter().filter(|p| p.contains("\\asm\\asm\\")).collect();
+        assert_eq!(asm.len(), 1, "classpath 只应有一个 ASM 版本: {:?}", asm);
+        assert!(asm[0].contains("9.8"), "应保留较高版本: {}", asm[0]);
+    }    // ── 集成: resolve_version 合并（Fabric 差异式 JSON + 父 vanilla）──
 
     #[test]
     fn resolve_version_merges_jvm_args() {

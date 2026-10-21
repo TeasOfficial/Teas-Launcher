@@ -330,28 +330,82 @@ pub fn mclib_list_from_json(
         }
     }
 
-    // 去重 — 参照 PCL-CE: 用完整 original_name 做键（含 classifier）
-    // ★ BUILD=72 修复: 之前用 name+is_natives 做键，导致不同 classifier 被错误合并
-    // 如 lwjgl-glfw:3.4.1:natives-windows 和 lwjgl-glfw:3.4.1:natives-windows-x86 被当成同一个
+    // 去重：键 = group:artifact[:classifier]（不含版本），同一坐标只留一个版本
+    //
+    // BUILD=72 曾用 name+is_natives 做键，把不同 classifier 的 natives 合并了，
+    // 于是改成完整名称；但完整名称含版本，又让 asm 9.6 / 9.8 同时进了 classpath，
+    // Fabric 直接崩：duplicate ASM classes found on classpath。
+    // 现在：坐标（去版本）+ 数值版本比较，取较高版本，natives 仍按 classifier 区分。
+    dedupe_tokens(result)
+}
+
+/// 同一 Maven 坐标只留一个版本（natives 按 classifier 区分）
+///
+/// 抽成独立函数是为了能单测：整合包同时带 asm 9.6 / 9.8 时，classpath 上会出现
+/// 两份 ASM，Fabric Loader 直接拒绝启动（duplicate ASM classes found on classpath）。
+pub(crate) fn dedupe_tokens(result: Vec<McLibToken>) -> Vec<McLibToken> {
     let mut deduped: Vec<McLibToken> = Vec::new();
     for token in result {
-        // ★ 键 = original_name（含 classifier，如 :natives-windows-x86）
-        let key = token.original_name.clone();
-        if let Some(existing) = deduped.iter().position(|t| {
-            t.original_name == key
-        }) {
-            // 同名库，保留高版本
-            let existing_ver = extract_version(&deduped[existing].local_path);
-            let current_ver = extract_version(&token.local_path);
-            if current_ver >= existing_ver {
-                deduped[existing] = token;
+        let key = maven_key(&token.original_name);
+        if let Some(idx) = deduped.iter().position(|t| maven_key(&t.original_name) == key) {
+            let existing_ver = maven_version(&deduped[idx].original_name);
+            let current_ver = maven_version(&token.original_name);
+            // 版本为空时无法比较，保留先出现的那个
+            if !current_ver.is_empty() && version_gt(&current_ver, &existing_ver) {
+                log::debug!("[lib] 同坐标多版本，保留高版本: {}（替换 {}）", token.original_name, existing_ver);
+                deduped[idx] = token;
             }
         } else {
             deduped.push(token);
         }
     }
-
     deduped
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::*;
+
+    fn tok(name: &str) -> McLibToken {
+        McLibToken {
+            original_name: name.to_string(),
+            name: maven_key(name),
+            local_path: PathBuf::from(format!("libraries/{}.jar", name.replace(':', "/"))),
+            url: None,
+            size: 0,
+            sha1: None,
+            is_natives: name.contains("natives"),
+            is_local: false,
+        }
+    }
+
+    #[test]
+    fn asm_duplicate_versions_collapse_to_highest() {
+        let out = dedupe_tokens(vec![
+            tok("org.ow2.asm:asm:9.6"),
+            tok("org.ow2.asm:asm:9.8"),
+            tok("org.ow2.asm:asm-analysis:9.8"),
+        ]);
+        assert_eq!(out.len(), 2, "asm 只应剩一个版本");
+        assert_eq!(out[0].original_name, "org.ow2.asm:asm:9.8", "应保留较高版本");
+    }
+
+    #[test]
+    fn natives_classifiers_stay_separate() {
+        let out = dedupe_tokens(vec![
+            tok("org.lwjgl:lwjgl:3.3.3"),
+            tok("org.lwjgl:lwjgl:3.3.3:natives-windows"),
+            tok("org.lwjgl:lwjgl:3.3.3:natives-windows-x86"),
+        ]);
+        assert_eq!(out.len(), 3, "主库与两个 natives classifier 必须都保留");
+    }
+
+    #[test]
+    fn version_compare_is_numeric() {
+        assert!(version_gt("9.10", "9.9"));
+        assert!(version_gt("1.2.3", "1.2.2"));
+        assert!(!version_gt("9.6", "9.8"));
+    }
 }
 
 /// 递归获取完整 libraries 列表 (含 inheritsFrom)
@@ -401,13 +455,69 @@ pub fn mclib_list_get(
     result
 }
 
-/// 提取版本号用于比较（用本地路径中的目录名）
-fn extract_version(path: &Path) -> String {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default()
+/// 拆 Maven 坐标 `group:artifact:version[:classifier]`
+fn maven_parts(name: &str) -> (String, String, String, String) {
+    let p: Vec<&str> = name.split(':').collect();
+    let group = p.first().copied().unwrap_or("").to_string();
+    let artifact = p.get(1).copied().unwrap_or("").to_string();
+    // NeoForge 的坐标会带扩展后缀（如 `cpw.mods:modlauncher:11.0.4@jar`），
+    // 比较版本前要剥掉，否则 "2.10.1" 与 "2.10.1@jar" 会被当成两个不同版本。
+    let version = p
+        .get(2)
+        .copied()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    // 第 4 段起都是 classifier（natives-windows / natives-windows-x86 …）
+    let classifier = if p.len() > 3 { p[3..].join(":") } else { String::new() };
+    (group, artifact, version, classifier)
 }
+
+/// 「同一个库」的判定键：group:artifact[:classifier]，**不含版本**
+///
+/// 以前用完整名称做键，导致 org.ow2.asm:asm:9.6 与 :9.8 被当成两个不同的库，
+/// classpath 上同时出现两份 ASM，Fabric Loader 直接拒绝启动：
+/// `duplicate ASM classes found on classpath`。
+pub(crate) fn maven_key(name: &str) -> String {
+    let (group, artifact, _version, classifier) = maven_parts(name);
+    if classifier.is_empty() {
+        format!("{}:{}", group, artifact)
+    } else {
+        format!("{}:{}:{}", group, artifact, classifier)
+    }
+}
+
+/// 取 Maven 坐标里的版本号（比从本地路径反推更可靠）
+fn maven_version(name: &str) -> String {
+    maven_parts(name).2
+}
+
+/// 版本比较：数字段按数值比，避免 "9.10" < "9.9" 的字典序错误
+pub(crate) fn version_gt(a: &str, b: &str) -> bool {
+    if a == b { return false; }
+    let split = |s: &str| -> Vec<String> {
+        s.split(|c: char| c == '.' || c == '-' || c == '+')
+            .map(|x| x.to_string())
+            .collect()
+    };
+    let (va, vb) = (split(a), split(b));
+    for i in 0..va.len().max(vb.len()) {
+        let x = va.get(i).cloned().unwrap_or_default();
+        let y = vb.get(i).cloned().unwrap_or_default();
+        match (x.parse::<u64>(), y.parse::<u64>()) {
+            (Ok(nx), Ok(ny)) => {
+                if nx != ny { return nx > ny; }
+            }
+            _ => {
+                if x != y { return x > y; }
+            }
+        }
+    }
+    false
+}
+
 
 /// 将 McLibToken 列表转换为 DownloadFile 任务列表
 ///
@@ -457,7 +567,79 @@ pub fn mclib_to_download_files(
             }
         }
 
-        // 使用标准 libraries.minecraft.net URL 生成回退源
+        // Forge 的 universal jar：版本 JSON 里这一条通常**没有 url**（只有 path），
+        // 文件实际在 forge maven 的 `-universal.jar` 上。不补这一条就只能去拼
+        // libraries.minecraft.net，那里没有这个文件 → 404（1.12.2 整合包启动失败的常见原因）。
+        let mut third_party = false;
+        if let Some(rest) = token.original_name.strip_prefix("net.minecraftforge:forge:") {
+            third_party = true;
+            // 版本号后面可能还跟着 classifier（`...:universal`），取第一段
+            let ver = rest.split(':').next().unwrap_or(rest);
+            // installer 不在这里处理；其余 forge 主 jar 在 maven 上实际叫 `-universal.jar`
+            if !ver.is_empty() && !token.local_path.to_string_lossy().contains("installer") {
+                let dir = format!("net/minecraftforge/forge/{}", ver);
+                let official = format!(
+                    "https://maven.minecraftforge.net/{}/forge-{}-universal.jar",
+                    dir, ver
+                );
+                let mirror = format!(
+                    "https://bmclapi2.bangbang93.com/maven/{}/forge-{}-universal.jar",
+                    dir, ver
+                );
+                // 现有 urls 往往是 libraries.minecraft.net 的死链，把它排到后面去
+                let mut forge_urls = if prefer_official {
+                    vec![official, mirror]
+                } else {
+                    vec![mirror, official]
+                };
+                for u in urls.drain(..) {
+                    if !forge_urls.contains(&u) {
+                        forge_urls.push(u);
+                    }
+                }
+                urls = forge_urls;
+                log::debug!(
+                    "[lib] Forge universal: {} -> {}",
+                    token.original_name,
+                    urls.first().cloned().unwrap_or_default()
+                );
+            }
+        }
+
+        // forge / fabric / neoforged 的 maven 库里放的**不是** Mojang 的库：
+        // jline / scala / modlauncher 这些在 libraries.minecraft.net 上根本不存在，
+        // 加进来只会得到 404，白白浪费 4 次重试（换源时还会把时间耗在死链上）。
+        if token.url.as_deref().map(|u| {
+            u.contains("minecraftforge") || u.contains("fabricmc") || u.contains("neoforged")
+        }).unwrap_or(false) {
+            third_party = true;
+        }
+        // 第三方 maven 的产物大多也发布在 Maven Central：阿里云镜像在国内速度好、
+        // 不限流，比 BMCLAPI 更稳（BMCLAPI 并发一高就 429/403）。
+        // Forge 的 universal jar 不在 Central，跳过以免多一次必然的 404。
+        if third_party && !token.original_name.starts_with("net.minecraftforge:forge:") {
+            let lib_rel = token.local_path.to_string_lossy().replace('\\', "/");
+            if let Some(i) = lib_rel.find("/libraries/") {
+                let rel = &lib_rel[i + "/libraries/".len()..];
+                let aliyun = format!("https://maven.aliyun.com/repository/public/{}", rel);
+                if !urls.contains(&aliyun) {
+                    // 官方源优先时排在官方之后、BMCLAPI 之前
+                    let mirror_pos = urls
+                        .iter()
+                        .position(|u| u.contains("bmclapi2.bangbang93.com"));
+                    match mirror_pos {
+                        Some(pos) => urls.insert(pos, aliyun),
+                        None => urls.push(aliyun),
+                    }
+                }
+            }
+        }
+
+        if third_party {
+            result.push(DownloadFile::new(urls, token.local_path.clone(), checker));
+            continue;
+        }
+
         let lib_rel = token
             .local_path
             .to_string_lossy()

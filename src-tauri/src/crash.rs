@@ -14,13 +14,8 @@ pub(crate) fn check_crash(
         return None;
     }
 
-    let base = std::path::Path::new(&mc_dir);
-    let dot_minecraft = if base.join(".minecraft").exists() {
-        base.join(".minecraft")
-    } else {
-        base.to_path_buf()
-    };
-    let teas = base.join(".teas");
+    let dot_minecraft = crate::utils::dot_minecraft(&mc_dir);
+    let teas = std::path::Path::new(&mc_dir).join(".teas");
     let stderr_log = teas.join("last_stderr.log");
     let crash_dir = dot_minecraft
         .join("versions")

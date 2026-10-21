@@ -74,16 +74,14 @@ pub fn source_library(original: &str, prefer_official: bool) -> Vec<String> {
         .any(|k| original.contains(k));
 
     if is_special_maven {
-        return vec![
-            original
-                .replace("https://piston-data.mojang.com", "https://bmclapi2.bangbang93.com/maven")
-                .replace("https://piston-meta.mojang.com", "https://bmclapi2.bangbang93.com/maven")
-                .replace("https://libraries.minecraft.net", "https://bmclapi2.bangbang93.com/maven"),
-            original
-                .replace("https://piston-data.mojang.com", "https://bmclapi2.bangbang93.com/libraries")
-                .replace("https://piston-meta.mojang.com", "https://bmclapi2.bangbang93.com/libraries")
-                .replace("https://libraries.minecraft.net", "https://bmclapi2.bangbang93.com/libraries"),
-        ];
+        // 以前这里只返回镜像，官方地址被完全跳过——用户选"官方源"也没用。
+        // 现在两边都保留，顺序交给 prefer_official。
+        // forge/fabric/neoforged 的地址是 maven.xxx.net，上面那些 replace 根本不会命中，
+        // 必须走 source_maven_bmclapi 才能得到镜像地址。
+        let official = vec![original.to_string()];
+        let mirror = source_maven_bmclapi(original);
+        let mirrors = if mirror != original { vec![mirror] } else { Vec::new() };
+        return source_order(official, mirrors, prefer_official);
     }
 
     let official = vec![original.to_string()];
@@ -130,19 +128,12 @@ pub fn source_assets(original: &str, prefer_official: bool) -> Vec<String> {
     source_order(official, mirrors, prefer_official)
 }
 
-/// Mod 文件下载源列表 (含回退)
-/// 参照 PCL-CE: comp_source_solution 决定优先级
-pub fn source_mod_download(original: &str, comp_source: u32) -> Vec<String> {
-    let mirror = original
-        .replace("https://cdn.modrinth.com", "https://mod.mcimirror.top")
-        .replace("https://edge.forgecdn.net", "https://mod.mcimirror.top");
-
-    match comp_source {
-        0 => vec![mirror.clone(), mirror, original.to_string()],        // 镜像优先
-        1 => vec![original.to_string(), mirror.clone(), original.to_string(), mirror], // 平衡
-        2 => vec![original.to_string(), original.to_string(), mirror],  // 官方优先
-        _ => vec![original.to_string(), mirror],                        // 默认
-    }
+/// Mod 文件下载源列表
+///
+/// MCIMirror 已停止运营，Modrinth / CurseForge 一律走官方地址。
+/// 保留 `comp_source` 形参只是为了让既有调用点不用改。
+pub fn source_mod_download(original: &str, _comp_source: u32) -> Vec<String> {
+    vec![original.to_string()]
 }
 
 /// BMCLAPI maven URL 构建
@@ -180,6 +171,21 @@ mod tests {
         let urls = source_launcher_or_meta(url, false);
         assert_eq!(urls[0], "https://bmclapi2.bangbang93.com/mc/game/version_manifest.json");
         assert_eq!(urls[1], url);
+    }
+
+    /// 回归：forge/fabric/neoforged 的 maven 以前只返回镜像，
+    /// 导致用户选「官方源」也照样从 bmclapi 下载。
+    #[test]
+    fn test_special_maven_respects_prefer_official() {
+        let url = "https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860-installer.jar";
+
+        let official_first = source_library(url, true);
+        assert_eq!(official_first[0], url, "官方源优先时第一个必须是官方地址");
+        assert!(official_first.iter().any(|u| u.contains("bmclapi2")), "镜像应作为兜底保留");
+
+        let mirror_first = source_library(url, false);
+        assert!(mirror_first[0].contains("bmclapi2"), "镜像优先时第一个必须是镜像");
+        assert!(mirror_first.iter().any(|u| u == url), "官方地址仍应保留");
     }
 
     #[test]

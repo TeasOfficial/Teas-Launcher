@@ -34,33 +34,9 @@ pub async fn install_cleanroom(
     let mut archive =
         zip::ZipArchive::new(archive_file).map_err(|e| format!("无法读取 installer: {}", e))?;
 
-    // 读取 version.json
-    let version_json = match archive.by_name("version.json") {
-        Ok(mut entry) => {
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut entry, &mut s)
-                .map_err(|e| e.to_string())?;
-            match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => Some(v),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        Err(_) => None,
-    };
-
-    // 如果有 install_profile.json 也读
-    let profile = match archive.by_name("install_profile.json") {
-        Ok(mut entry) => {
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut entry, &mut s)
-                .map_err(|e| e.to_string())?;
-            match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => Some(v),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        Err(_) => None,
-    };
+    // 读取 version.json / install_profile.json（都不一定存在）
+    let version_json = crate::install::merge::read_json_entry(&mut archive, "version.json")?;
+    let profile = crate::install::merge::read_json_entry(&mut archive, "install_profile.json")?;
 
     let mut merged = profile.unwrap_or(version_json.clone().unwrap_or(serde_json::json!({})));
     if let Some(vj) = &version_json {
@@ -72,11 +48,7 @@ pub async fn install_cleanroom(
     merged["inheritsFrom"] = serde_json::Value::String("1.12.2".to_string());
 
     // 下载 libraries
-    let libs = crate::version::library::mclib_list_from_json(&merged, mc_dir);
-    let mut dl_files = crate::version::library::mclib_to_download_files(&libs, false);
-    if !dl_files.is_empty() {
-        crate::download::engine::download_files_parallel(app, &mut dl_files, 8).await;
-    }
+    crate::install::merge::download_json_libraries(app, mc_dir, &merged).await;
 
     // 保存 JSON
     let target = mc_dir.join("versions").join(instance_name);

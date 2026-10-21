@@ -37,10 +37,8 @@ pub(crate) fn apply_source(url: &str, source: &str) -> String {
             .replace("https://resources.download.minecraft.net", "https://bmclapi2.bangbang93.com/assets")
             .replace("https://maven.minecraftforge.net", "https://bmclapi2.bangbang93.com/maven")
             .replace("https://maven.neoforged.net/releases", "https://bmclapi2.bangbang93.com/maven"),
-        "MCIMirror" => url
-            .replace("https://api.modrinth.com/v2/", "https://mod.mcimirror.top/modrinth/v2/")
-            .replace("https://cdn.modrinth.com/data/", "https://mod.mcimirror.top/data/")
-            .replace("https://api.curseforge.com/v1/", "https://mod.mcimirror.top/curseforge/v1/"),
+        // MCIMirror 已于 2025 年停止运营，不再提供该镜像分支
+        "官方源" | "Official" => url.to_string(),
         _ => url.to_string(),
     }
 }
@@ -62,6 +60,11 @@ pub(crate) fn build_http_client(timeout: Duration) -> Result<reqwest::Client, St
         config_read("user".to_string()).unwrap_or(serde_json::json!({}));
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
+        // 强制 HTTP/1.1：BMCLAPI 走 Cloudflare，reqwest 默认协商 h2 时
+        // 会被回 403（同样的地址 curl/HTTP1.1 是 200），换源后等于永远失败。
+        .http1_only()
+        // 带上浏览器 UA，部分 CDN 对空/库默认 UA 更严格
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) TeasLauncher/0.1")
         .timeout(timeout);
 
     if let Some(proxy_type) = cfg.get("proxy_type").and_then(|v| v.as_str()) {

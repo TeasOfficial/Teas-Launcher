@@ -179,6 +179,36 @@ fn clean_empty_jars(dir: &std::path::Path, deleted: &mut u32) {
     }
 }
 
+/// 把启动器目录归一成真正的游戏目录（`.minecraft`）
+///
+/// 用户可能把根目录直接指向游戏目录，也可能指向它的父目录；
+/// 这两种布局在下载 / 修复 / 启动里都要判断，统一放这里。
+pub(crate) fn dot_minecraft(mc_dir: &str) -> std::path::PathBuf {
+    let base = std::path::Path::new(mc_dir);
+    let nested = base.join(".minecraft");
+    if nested.exists() {
+        nested
+    } else {
+        base.to_path_buf()
+    }
+}
+
+/// 实例的游戏目录（版本隔离）
+///
+/// mods / resourcepacks / shaderpacks / saves 在版本隔离下位于
+/// `versions/<name>/`，否则回落到 .minecraft 根目录。
+pub(crate) fn instance_game_dir(
+    dot_minecraft: &std::path::Path,
+    instance_name: &str,
+) -> std::path::PathBuf {
+    let instance_dir = dot_minecraft.join("versions").join(instance_name);
+    if !instance_name.is_empty() && instance_dir.exists() {
+        instance_dir
+    } else {
+        dot_minecraft.to_path_buf()
+    }
+}
+
 /// 检测实例的加载器类型
 pub(crate) fn detect_loader(path: &std::path::Path) -> &str {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {

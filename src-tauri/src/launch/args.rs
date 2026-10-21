@@ -312,7 +312,12 @@ pub(super) fn build_game_args(
 /// - OptiFine 放倒数第二位（PCL-style）
 /// - 主 JAR 最后（jar 字段 / inheritsFrom 重定向）
 pub(super) fn build_classpath(ctx: &LaunchContext, version: &serde_json::Value) -> Vec<String> {
-    let mut cp: Vec<String> = Vec::new();
+    // 同一 Maven 坐标只保留一个版本（保留较高版本）。
+    //
+    // 整合包/加载器 profile 常同时带 asm 9.6 与 9.8；两条都进 classpath 时
+    // Fabric Loader 会直接拒绝启动：`duplicate ASM classes found on classpath`。
+    // 以前这里只按路径字符串去重，不同版本的路径不同，等于没去重。
+    let mut entries: Vec<(String, String, String)> = Vec::new(); // (坐标, 版本, classpath 路径)
     let mut optifine_path: Option<String> = None;
 
     if let Some(libs) = version["libraries"].as_array() {
@@ -335,11 +340,29 @@ pub(super) fn build_classpath(ctx: &LaunchContext, version: &serde_json::Value) 
 
             if name.starts_with("optifine:OptiFine") || name.starts_with("optifine:optifine") {
                 optifine_path = Some(path_str);
-            } else {
-                cp.push(path_str);
+                continue;
+            }
+
+            let key = crate::version::library::maven_key(name);
+            let ver = name.split(':').nth(2).unwrap_or("").to_string();
+            match entries.iter().position(|e| e.0 == key) {
+                Some(idx) => {
+                    if !ver.is_empty()
+                        && crate::version::library::version_gt(&ver, &entries[idx].1)
+                    {
+                        log::debug!(
+                            "[cp] 同坐标多版本，保留高版本: {}（替换 {}）",
+                            name, entries[idx].1
+                        );
+                        entries[idx] = (key, ver, path_str);
+                    }
+                }
+                None => entries.push((key, ver, path_str)),
             }
         }
     }
+
+    let mut cp: Vec<String> = entries.into_iter().map(|e| e.2).collect();
 
     // OptiFine 放到倒数第二位（主 JAR 之前）
     if let Some(optifine) = optifine_path {

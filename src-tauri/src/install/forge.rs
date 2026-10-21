@@ -23,6 +23,7 @@ pub async fn install_forge_loader(
     instance_name: &str,
     mc_version: &str,
     forge_version: &str,
+    prefer_official: bool,
 ) -> Result<(), String> {
     let _client = crate::http::build_http_client(Duration::from_secs(600))?;
     let mc_clean = mc_version.replace('-', "_");
@@ -33,20 +34,21 @@ pub async fn install_forge_loader(
     let installer_path = tmp_dir.join("forge_installer.jar");
 
     // 1) 下载 installer.jar
-    let installer_urls: Vec<String> = vec![
-        format!(
-            "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
-            mc_clean, forge_version, mc_clean, forge_version
-        ),
-        format!(
-            "https://files.minecraftforge.net/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
-            mc_clean, forge_version, mc_clean, forge_version
-        ),
-        format!(
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
-            mc_clean, forge_version, mc_clean, forge_version
-        ),
-    ];
+    // 官方 maven 与 BMCLAPI 镜像都列出来，顺序由用户的下载源设置决定。
+    // 这里以前把 bmclapi 写死在第一位，导致选"官方源"也照样走镜像。
+    let official = format!(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
+        mc_clean, forge_version, mc_clean, forge_version
+    );
+    let mirror = format!(
+        "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
+        mc_clean, forge_version, mc_clean, forge_version
+    );
+    let installer_urls: Vec<String> = if prefer_official {
+        vec![official, mirror]
+    } else {
+        vec![mirror, official]
+    };
 
     let mut installer_dl = DownloadFile::new(
         installer_urls,
@@ -62,15 +64,8 @@ pub async fn install_forge_loader(
     let mut archive =
         zip::ZipArchive::new(archive_file).map_err(|e| format!("无法读取 installer: {}", e))?;
 
-    let profile = {
-        let entry = archive
-            .by_name("install_profile.json")
-            .map_err(|_| "installer 中无 install_profile.json".to_string())?;
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::BufReader::new(entry), &mut s)
-            .map_err(|e| e.to_string())?;
-        serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())?
-    };
+    let profile =
+        crate::install::merge::read_required_json_entry(&mut archive, "install_profile.json")?;
 
     let spec = profile.get("spec").and_then(|s| s.as_u64()).unwrap_or(0);
     let version_major: f64 = forge_version
@@ -100,14 +95,7 @@ async fn install_forge_new(
     tmp_dir: &Path,
 ) -> Result<(), String> {
     // 1) 提取 version.json 并合并到 install_profile 数据
-    let version_entry = archive
-        .by_name("version.json")
-        .map_err(|_| "installer 中无 version.json".to_string())?;
-    let mut s = String::new();
-    std::io::Read::read_to_string(&mut std::io::BufReader::new(version_entry), &mut s)
-        .map_err(|e| e.to_string())?;
-    let version_json: serde_json::Value =
-        serde_json::from_str(&s).map_err(|e| e.to_string())?;
+    let version_json = crate::install::merge::read_required_json_entry(archive, "version.json")?;
 
     // PCL-CE json.Merge(json2): System.Text.Json.Nodes.JsonObject.Merge
     // JsonArray 拼接，普通值补充
@@ -134,14 +122,10 @@ async fn install_forge_new(
     merged["inheritsFrom"] = serde_json::Value::String(mc_version.to_string());
 
     // 2) 解析 libraries → 下载
-    let libs = crate::version::library::mclib_list_from_json(&merged, mc_dir);
-    let mut dl_files = crate::version::library::mclib_to_download_files(&libs, false);
-    if !dl_files.is_empty() {
-        crate::download::engine::download_files_parallel(app, &mut dl_files, 8).await;
-    }
+    crate::install::merge::download_json_libraries(app, mc_dir, &merged).await;
 
     // 3) 提取内嵌 Maven 库
-    extract_embedded_maven(archive, mc_dir);
+    crate::install::merge::extract_embedded_maven(archive, mc_dir);
 
     // 4) 保存合并后的 version JSON
     let target = mc_dir.join("versions").join(instance_name);
@@ -162,42 +146,6 @@ async fn install_forge_new(
     let _ = std::fs::remove_dir_all(tmp_dir);
     log::info!("[forge] 新版 Forge 安装完成: {}-forge-{}", mc_version, forge_version);
     Ok(())
-}
-
-/// 提取 installer JAR 内嵌的 Maven 库到 libraries/
-///
-/// installer 会把部分库直接打包在 `maven/` 目录下，这些文件不在 version JSON 的
-/// libraries 列表里，必须单独解出来，否则启动时找不到类。
-fn extract_embedded_maven(archive: &mut zip::ZipArchive<std::fs::File>, mc_dir: &Path) {
-    let libs_dir = mc_dir.join("libraries");
-
-    // 先收集再解压：borrow checker 不允许在遍历 archive 时同时 by_name 取内容
-    let entries: Vec<(String, std::path::PathBuf)> = {
-        let mut result = Vec::new();
-        for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i) {
-                let name = entry.name().to_string();
-                if name.starts_with("maven/") && !name.ends_with('/') {
-                    let dest = libs_dir.join(name.trim_start_matches("maven/"));
-                    if !dest.exists() {
-                        result.push((name, dest));
-                    }
-                }
-            }
-        }
-        result
-    };
-
-    for (name, dest) in entries {
-        if let Some(p) = dest.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        if let Ok(mut e) = archive.by_name(&name) {
-            if let Ok(mut out) = std::fs::File::create(&dest) {
-                let _ = std::io::copy(&mut e, &mut out);
-            }
-        }
-    }
 }
 
 /// 运行 Forge installer 进程
@@ -311,7 +259,7 @@ fn install_forge_legacy(
         }
 
         // 解压 maven/ 目录
-        extract_embedded_maven(archive, mc_dir);
+        crate::install::merge::extract_embedded_maven(archive, mc_dir);
     }
 
     let _ = std::fs::remove_dir_all(tmp_dir);

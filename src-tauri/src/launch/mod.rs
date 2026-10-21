@@ -44,7 +44,7 @@ use crate::utils::{offline_uuid, scan_and_fix_jars_with_strategy, JarScanStrateg
 use crate::version::assets::{mcassets_fix_list, mcassets_get_index_name, download_asset_index};
 use crate::version::library::mclib_from_instance;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Emitter;
 
@@ -169,12 +169,7 @@ impl LaunchContext {
         window_width: u32,
         window_height: u32,
     ) -> Self {
-        let base = Path::new(mc_dir);
-        let dot_minecraft = if base.join(".minecraft").exists() {
-            base.join(".minecraft")
-        } else {
-            base.to_path_buf()
-        };
+        let dot_minecraft = crate::utils::dot_minecraft(mc_dir);
 
         let cfg = crate::config::config_read("user".to_string())
             .unwrap_or(serde_json::json!({}));
@@ -548,18 +543,10 @@ async fn ensure_vanilla_version(
         let client = crate::http::build_http_client(
             std::time::Duration::from_secs(30)
         )?;
-        let manifest: serde_json::Value = client
-            .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
-            .send().await
-            .map_err(|e| format!("获取版本清单失败: {}", e))?
-            .json().await
-            .map_err(|e| format!("解析版本清单失败: {}", e))?;
-
-        if let Some(ver_url) = manifest["versions"].as_array()
-            .and_then(|a| a.iter().find(|pv| pv["id"].as_str() == Some(parent_name)))
-            .and_then(|pv| pv["url"].as_str())
+        if let Ok(ver_url) =
+            crate::version::manifest::resolve_version_url(&client, parent_name).await
         {
-            let urls = source_launcher_or_meta(ver_url, ctx.prefer_official);
+            let urls = source_launcher_or_meta(&ver_url, ctx.prefer_official);
             let mut dl = DownloadFile::new(
                 urls, cache_json.clone(),
                 FileChecker { min_size: 500, is_json: true, ..Default::default() }

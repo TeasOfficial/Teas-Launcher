@@ -3,6 +3,7 @@
 //! 模块划分:
 //! - utils:      JAR 校验、文件操作、UUID 生成、Natives 提取、OS 过滤
 //! - http:       HTTP 客户端、代理、取消下载
+//! - progress:   进度事件 (download-progress) 的统一发射入口
 //! - config:     配置读写 (tc.ini)、.teas 目录
 //! - download:   下载引擎 (model, source, engine) — PCL-CE 移植
 //! - version:    版本管理 (library, assets, manifest) — PCL-CE 移植
@@ -20,6 +21,7 @@
 
 mod utils;
 mod http;
+mod progress;
 mod config;
 mod download;
 mod version;
@@ -32,13 +34,36 @@ mod modrinth;
 mod curseforge;
 mod modpack;
 
-pub(crate) const BUILD: u32 = 75;
+pub(crate) const BUILD: u32 = 92;
 
 /// 构建日志插件 — 写入 .teas/launcher.log，dev 下同时输出到控制台
 ///
 /// 级别：dev 用 Debug（排查时正需要命令行/natives/log4j 这些细节），
 /// release 用 Info。游戏自身的 stdout/stderr 统一打在 debug 级，
 /// 否则一次启动就能往日志里灌近 3000 行，把启动器自己的诊断挤掉。
+/// 目录是否可写（用探测文件判断，不依赖 ACL 读取）
+///
+/// 日志目录不可写不应该连累启动：以前直接注册 Folder target，插件初始化失败
+/// 会让整个 `Builder::run()` panic（表现为"双击没反应"）。
+fn is_dir_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".teas-write-probe");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(e) => {
+            // 把真实原因打出来：只报"不可写"会让排查停在猜测上
+            eprintln!("[log] 写入探测失败: {} -> {:?}", probe.display(), e);
+            false
+        }
+    }
+}
+
 fn build_logger<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     let teas = config::teas_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -48,7 +73,7 @@ fn build_logger<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         log::LevelFilter::Info
     };
 
-    let builder = tauri_plugin_log::Builder::new()
+    let mut builder = tauri_plugin_log::Builder::new()
         // Builder::new() 自带 Stdout + LogDir 两个默认 target，不清掉的话：
         // dev 会把 Stdout 注册两遍（每行打印两次），release 会同时写
         // .teas/launcher.log 和系统日志目录里的另一个文件。
@@ -56,22 +81,32 @@ fn build_logger<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .level(level)
         // 默认是 UTC，日志时间会比本地时间差 8 小时，排查时对不上
         .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-        .max_file_size(5 * 1024 * 1024)
-        .target(tauri_plugin_log::Target::new(
+        .max_file_size(5 * 1024 * 1024);
+
+    // 目录不可写（ACL / 只读盘 / 被占用）时降级为只输出 stdout，
+    // 而不是让整个启动流程 panic。这类问题必须能在 UI 里被发现，
+    // 不能表现为"点了图标什么都没发生"。
+    let file_target_ok = is_dir_writable(&teas);
+    if file_target_ok {
+        builder = builder.target(tauri_plugin_log::Target::new(
             tauri_plugin_log::TargetKind::Folder {
-                path: teas,
+                path: teas.clone(),
                 file_name: Some("launcher".into()),
             },
         ));
-
-    // dev 下额外保留控制台输出，方便直接观察
-    let builder = if cfg!(dev) {
-        builder.target(tauri_plugin_log::Target::new(
-            tauri_plugin_log::TargetKind::Stdout,
-        ))
     } else {
-        builder
-    };
+        eprintln!(
+            "[log] 日志目录不可写，本次仅输出到控制台: {}",
+            teas.display()
+        );
+    }
+
+    // dev 下保留控制台输出；文件 target 降级时也必须有 stdout，否则一条日志都没了
+    if cfg!(dev) || !file_target_ok {
+        builder = builder.target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::Stdout,
+        ));
+    }
 
     builder.build()
 }
@@ -92,6 +127,9 @@ fn install_panic_hook() {
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "未知位置".to_string());
+        // 先写 stderr：panic 可能发生在日志插件初始化之前（那时 log::error! 会被丢弃，
+        // 表现就是"进程直接消失、日志里什么都没有"）。GUI 子系统下 stderr 可被重定向捕获。
+        eprintln!("[panic] {} @ {}", msg, loc);
         log::error!("[panic] {} @ {}", msg, loc);
     }));
 }
@@ -132,6 +170,9 @@ pub fn run() {
             instance::fix_instance,
             instance::list_instances,
             instance::delete_instance,
+            instance::open_instance_folder,
+            instance::instance_config_read,
+            instance::instance_config_write,
             // ── 启动 ──
             launch::launch_instance,
             launch::kill_instance,
@@ -143,13 +184,17 @@ pub fn run() {
             modrinth::search_bbsmc,
             modrinth::get_project,
             modrinth::get_project_versions,
-            modrinth::install_project,
             modrinth::install_file,
             // ── CurseForge API ──
             curseforge::search_curseforge,
             curseforge::get_curseforge_project,
             curseforge::get_curseforge_files,
             curseforge::install_curseforge_file,
+            // ── CurseForge API Key（本地密钥，不回传） ──
+            curseforge::curseforge_key_status,
+            curseforge::curseforge_save_key,
+            curseforge::curseforge_clear_key,
+            curseforge::curseforge_test_key,
             // ── 整合包安装 ──
             modpack::install_modpack,
             modpack::install_local_modpack,

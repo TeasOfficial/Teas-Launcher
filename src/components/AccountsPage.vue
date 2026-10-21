@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, inject } from "vue";
+import { ref, inject, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { writeUserConfig } from "../utils/config";
 import type { Account } from "../App.vue";
 
 const accounts = inject<Account[]>("accounts")! as unknown as Ref<Account[]>;
 const setActiveAccount = inject<(i: number) => void>("setActiveAccount")!;
 
 async function saveAccounts() {
-  try { await invoke("config_write", { scope: "user", key: "accounts", value: accounts.value }); } catch { /* */ }
+  await writeUserConfig("accounts", accounts.value);
 }
 
 const showDialog = ref(false);
@@ -62,7 +63,7 @@ function setActive(index: number) {
 async function removeAccount(index: number) {
   accounts.value.splice(index, 1);
   // 如果删除的是当前激活的，激活第一个
-  if (!accounts.value.some(a => a.active) && accounts.value.length > 0) {
+  if (!accounts.value.some((a: Account) => a.active) && accounts.value.length > 0) {
     accounts.value[0].active = true;
     accounts.value = [...accounts.value];
   }

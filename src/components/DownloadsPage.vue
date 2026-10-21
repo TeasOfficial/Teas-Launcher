@@ -1,9 +1,24 @@
 <script setup lang="ts">
-import { ref, inject } from "vue";
+import { ref, inject, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import type { Instance } from "../App.vue";
+import { readUserConfig } from "../utils/config";
 import { useGameInstall } from "../composables/useGameInstall";
 
 const activeInstance = inject<any>("activeInstance");
+
+// 实例列表由 App.vue provide。安装完新实例必须刷新这份共享状态，
+// 否则要重启启动器（或切页触发重新扫描）才能看到刚装好的版本。
+const instances = inject<Ref<Instance[]>>("instances", ref([]) as Ref<Instance[]>);
+
+async function refreshInstances() {
+  try {
+    const mcDir = await invoke<string>("get_minecraft_dir");
+    instances.value = await invoke<Instance[]>("list_instances", { mcDir });
+  } catch (e) {
+    console.warn("[DL] 刷新实例列表失败:", e);
+  }
+}
 
 // ★ PCL-style 版本判定: 检查 mod/game version 是否与当前实例兼容
 function getMCVersion(): string {
@@ -29,7 +44,13 @@ function compatBadge(modVersions: string[]): { cls: string; text: string } {
     : { cls: "dl-compat-warn", text: "⚠ 版本可能不兼容" };
 }
 
-type Section = "main" | "game" | "modpack" | "resource" | "search" | "detail";
+const emit = defineEmits<{
+  (e: "navigate", page: string): void;
+  /** 用户从「本地整合包」按钮选了文件，交给 App.vue 走拖放安装页 */
+  (e: "local-pack", path: string): void;
+}>();
+
+type Section = "main" | "game" | "modpack" | "resource" | "search" | "detail" | "install" | "modpack-install";
 
 const active = ref<Section>("main");
 const searchType = ref("");
@@ -47,20 +68,22 @@ const addDlTask = inject<(name: string) => number>("addDlTask", () => { console.
 const updateDlTask = inject<(id: number, status: string) => void>("updateDlTask", () => { console.error("[DL] updateDlTask 注入失败!"); });
 const finishDlTask = inject<(id: number, error?: string) => void>("finishDlTask", () => { console.error("[DL] finishDlTask 注入失败!"); });
 
-async function getModSource() { try { const cfg=await invoke("config_read",{scope:"user"}); return cfg.mod_source||"MCIMirror"; } catch { return "MCIMirror"; } }
+// MCIMirror 已停止运营：Mod / 整合包一律走官方源，不再读 mod_source 配置。
+// 保留这个函数只是为了让 8 个调用点不用改（后端仍需要 source 参数区分官方/镜像，传入官方即可）。
+async function getModSource() { return "官方源"; }
 
 // ── 游戏版本安装向导（状态机见 composables/useGameInstall.ts）──
 const {
   gameVersions, gameExpanded, gameLeaving, gameVersionList, gameLoading,
-  toggleGameCard, isGameCardExpanded,
-  showGameInstall, selectedGameVer, forgeMcVersions,
+  toggleGameCard,
+  selectedGameVer, forgeMcVersions,
   selectedLoader, selectedLoaderVer, installGameInstanceName,
   showLoaderVersions, loaderVersionList, loaderVersionLoading, pendingLoader,
   openLoaderVersions, confirmLoaderVersion, backToLoaderSelect,
   loaderOptions, isLoaderCompatible, getRecommendedLoader, getLoaderIncompatReason,
-  isLoaderDisabled, selectLoader, gameInstallName,
+  isLoaderDisabled, gameInstallName,
   doInstallGame, closeGameInstall, openGameInstall,
-} = useGameInstall({ addDlTask, updateDlTask, finishDlTask, installMsg });
+} = useGameInstall({ addDlTask, updateDlTask, finishDlTask, installMsg, refreshInstances });
 
 
 const resourceTypes = [
@@ -74,13 +97,12 @@ const resourceTypes = [
 const sectionTitle: Record<string, { zh: string; en: string }> = {
   main: { zh: "获取内容", en: "BROWSE" },
   game: { zh: "原版游戏", en: "VANILLA GAME" },
+  install: { zh: "安装游戏", en: "INSTALL GAME" },
+  "modpack-install": { zh: "安装整合包", en: "INSTALL MODPACK" },
   resource: { zh: "资源浏览", en: "RESOURCES" },
   search: { zh: "搜索资源", en: "SEARCH" },
   detail: { zh: "资源详情", en: "DETAILS" },
 };
-
-const sources = ["全部", "CurseForge", "Modrinth", "BBSMC"];
-const loaders = ["全部", "Forge", "Fabric", "NeoForge"];
 
 // 版本下拉筛选（从搜索结果/详情动态收集）
 const showVersionDropdown = ref(false);
@@ -121,7 +143,6 @@ interface SearchHit {
   versions: string[]; categories: string[]; display_categories: string[];
 }
 
-const searchSource = ref("全部");
 const searchSort = ref("relevance");
 const searchQuery = ref("");
 const searchVersion = ref("");
@@ -143,6 +164,15 @@ function debouncedSearch() {
   searchDebounce = window.setTimeout(() => {
     doSearch(0);
   }, 400); // 400ms debounce
+}
+
+/** 点「搜索」立即执行：先取消待触发的 debounce，避免一次输入发两遍请求 */
+function searchNow() {
+  if (searchDebounce !== null) {
+    clearTimeout(searchDebounce);
+    searchDebounce = null;
+  }
+  doSearch(0);
 }
 
 const sortOptions = [
@@ -200,10 +230,9 @@ async function doSearch(page: number = 0) {
 }
 
 interface CfFile { id: number; fileName: string; fileLength: number; downloadUrl: string; }
-interface CfVersion { id: number; name: string; gameVersions: string[]; loaders: string[]; files: CfFile[]; }
 interface VersionFile { filename: string; url: string; size: number; }
 interface ProjectVersion { id: string; name: string; version_number: string; loaders: string[]; game_versions: string[]; files: VersionFile[]; }
-interface ProjectDetail { title: string; description: string; icon_url: string; downloads: number; followers: number; author: string; versions: ProjectVersion[]; }
+interface ProjectDetail { title: string; description: string; icon_url: string; downloads: number; followers: number; author: string; versions: ProjectVersion[]; /** 兼容性横幅用；CF 分支没有这个字段，故可选 */ game_versions?: string[]; }
 
 const projectDetail = ref<ProjectDetail | null>(null);
 const detailVersions = ref<ProjectVersion[]>([]);
@@ -259,18 +288,37 @@ async function installCfFile(file: CfFile & { projectType: string }) {
   }
 }
 
-const showModpackDialog = ref(false);
 const modpackFileName = ref("");
 const modpackFileUrl = ref("");
+const modpackFileSize = ref(0);
 const modpackInstanceName = ref("");
 const modpackConflict = ref(false);
+/** 安装整合包页的返回目标（详情页 / 搜索页） */
+const modpackReturnTo = ref<Section>("detail");
 
 function openModpackInstall(f: VersionFile, versionName: string) {
   modpackFileName.value = f.filename;
   modpackFileUrl.value = f.url;
-  modpackInstanceName.value = versionName || f.filename;
+  modpackFileSize.value = f.size || 0;
+  // 实例名不该带扩展名：CF 的 versionName 往往就是文件名（xxx.zip）
+  modpackInstanceName.value = (versionName || f.filename).replace(/\.(zip|mrpack)$/i, "");
   modpackConflict.value = false;
-  showModpackDialog.value = true;
+  // 从详情页点「安装」进来的，取消/完成后回到详情页
+  modpackReturnTo.value = active.value === "detail" ? "detail" : "search";
+  active.value = "modpack-install";
+  void checkConflict();
+}
+
+/** 管理员运行时系统会拦截拖放（UIPI），这里提供不依赖拖放的选择入口 */
+async function pickLocalPack() {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "整合包", extensions: ["mrpack", "zip"] }],
+    });
+    if (typeof selected === "string" && selected) emit("local-pack", selected);
+  } catch { /* 用户取消 */ }
 }
 
 async function checkConflict() {
@@ -284,7 +332,7 @@ async function checkConflict() {
 
 async function confirmModpackInstall() {
   if (!modpackInstanceName.value.trim()) return;
-  showModpackDialog.value = false;
+  active.value = modpackReturnTo.value;
   const taskId = addDlTask(modpackInstanceName.value);
   console.log(`[DL] confirmModpackInstall 开始: taskId=${taskId} name=${modpackInstanceName.value}`);
   installMsg.value = `正在安装整合包 ${modpackInstanceName.value}...`;
@@ -293,7 +341,7 @@ async function confirmModpackInstall() {
   try {
     const mcDir = await invoke<string>("get_minecraft_dir");
     const source = await getModSource();
-    const dlThreads = parseInt((await invoke("config_read", {scope:"user"})).dl_threads) || 8;
+    const dlThreads = parseInt((await readUserConfig()).dl_threads) || 8;
     console.log(`[DL] 调用 install_modpack: ${modpackFileName.value} source=${source} threads=${dlThreads}`);
     const msg = await invoke<string>("install_modpack", {
       mcDir, url: modpackFileUrl.value, filename: modpackFileName.value,
@@ -302,6 +350,7 @@ async function confirmModpackInstall() {
     console.log(`[DL] install_modpack 返回成功: "${msg}"`);
     installMsg.value = msg;
     success = true;
+    await refreshInstances();
   } catch (e) {
     console.error(`[DL] confirmModpackInstall 异常: taskId=${taskId}`, e);
     errorMsg = String(e);
@@ -344,23 +393,6 @@ async function installFile(url: string, filename: string) {
   }
 }
 
-async function installProject(project: SearchHit) {
-  installMsg.value = `正在安装 ${project.title.slice(0,30)}...`;
-  try {
-    const mcDir = await invoke<string>("get_minecraft_dir");
-    const instName = activeInstance?.value?.name || "";
-    const msg = await invoke<string>("install_project", {
-      mcDir, projectId: project.project_id, projectType: currentBbsmcType.value,
-      instanceName: instName,
-    });
-    installMsg.value = msg;
-    setTimeout(() => { installMsg.value = ""; }, 4000);
-  } catch (e) {
-    installMsg.value = `安装失败: ${e}`;
-    setTimeout(() => { installMsg.value = ""; }, 5000);
-  }
-}
-
 function openSearch(type: { id: string; zh: string; en: string; bbsmcType: string }) {
   currentBbsmcType.value = type.bbsmcType;
   searchResults.value = [];
@@ -373,9 +405,34 @@ function openSearch(type: { id: string; zh: string; en: string; bbsmcType: strin
 }
 
 function goBack() {
+  if (active.value === "modpack-install") { active.value = modpackReturnTo.value; return; }
+  if (active.value === "install") {
+    // 加载器版本子页：先退回加载器列表，再退就是离开安装页
+    if (showLoaderVersions.value) { backToLoaderSelect(); return; }
+    cancelInstall();
+    return;
+  }
   if (active.value === "detail") { active.value = "search"; }
   else if (active.value === "search") { active.value = "resource"; }
   else { active.value = "main"; }
+}
+
+// ── 安装游戏：整页流程（替代早期弹窗） ──
+function openInstallPage(verId: string) {
+  openGameInstall(verId);
+  active.value = "install";
+}
+function cancelInstall() {
+  closeGameInstall();
+  active.value = "game";
+}
+async function confirmInstall() {
+  await doInstallGame();
+  active.value = "game";
+}
+/** 加载器 id → 中文名（摘要栏用） */
+function loaderLabel(id: string) {
+  return loaderOptions.find((l) => l.id === id)?.zh || "原版";
 }
 </script>
 
@@ -419,7 +476,7 @@ function goBack() {
             <div v-if="gameLoading" style="padding:8px;color:var(--text-dim)">加载中...</div>
             <div v-else class="dl-game-ver-list">
               <div v-for="v in gameVersionList" :key="v.id" class="dl-game-ver-row"
-                @click.stop="openGameInstall(v.id)">
+                @click.stop="openInstallPage(v.id)">
                 <span class="dl-game-ver-id">{{ v.id }}</span>
                 <span class="dl-game-ver-type">{{ v.type }}</span>
                 <span v-if="forgeMcVersions.includes(v.id)" class="dl-forge-tag" title="Forge 可用">⚒</span>
@@ -448,7 +505,12 @@ function goBack() {
         </div>
         <div class="dl-search-bar">
           <input class="dl-search-input" v-model="searchQuery" :placeholder="`搜索${searchType}`" @keyup.enter="doSearch(0)" @input="debouncedSearch" />
-          <button class="dl-install-btn" style="flex-shrink:0" @click="() => { if (searchDebounce) clearTimeout(searchDebounce); doSearch(0); }" :disabled="searchLoading">
+          <button v-if="currentBbsmcType === 'modpack'" class="dl-install-btn dl-local-btn" style="flex-shrink:0"
+            title="管理员身份运行时，Windows 会拦截从资源管理器拖放文件，可用此入口选择本地整合包"
+            @click="pickLocalPack">
+            <span class="bl-zh">本地整合包</span>
+          </button>
+          <button class="dl-install-btn" style="flex-shrink:0" @click="searchNow" :disabled="searchLoading">
             <span class="bl-zh">{{ searchLoading ? '搜索中...' : '搜索' }}</span>
           </button>
         </div>
@@ -515,6 +577,139 @@ function goBack() {
         </Transition>
       </div>
 
+      <!-- 安装游戏（整页流程，替代早期弹窗） -->
+      <div v-else-if="active === 'install'" key="install" class="dl-install-view">
+        <!-- 加载器版本子页 -->
+        <template v-if="showLoaderVersions">
+          <div class="dl-install-subhead">
+            <button class="dl-back-btn" @click="backToLoaderSelect()">
+              ← <span class="bl-zh">选择加载器</span><span class="bl-en">LOADERS</span>
+            </button>
+            <span class="dl-install-subver">{{ selectedGameVer }} · {{ loaderLabel(pendingLoader) }}</span>
+          </div>
+          <div v-if="loaderVersionLoading" class="dl-install-empty">加载中...</div>
+          <div v-else-if="loaderVersionList.length === 0" class="dl-install-empty">
+            未找到适用于 {{ selectedGameVer }} 的 {{ loaderLabel(pendingLoader) }} 版本
+          </div>
+          <div v-else class="dl-ver-grid">
+            <button v-for="v in loaderVersionList" :key="v.version" class="dl-ver-card"
+              :class="{ active: selectedLoader === pendingLoader && selectedLoaderVer === v.version }"
+              @click="confirmLoaderVersion(v.version)">
+              <span class="dl-ver-card-num">{{ v.version }}</span>
+              <span v-if="v.stable && loaderVersionList[0]?.version === v.version" class="dl-ver-card-tag">推荐</span>
+            </button>
+          </div>
+        </template>
+
+        <!-- 主页面：左选加载器 / 右安装摘要 -->
+        <template v-else>
+          <div class="dl-install-grid">
+            <div class="dl-install-main">
+              <div class="dl-install-hero">
+                <span class="dl-install-hero-label">MINECRAFT</span>
+                <span class="dl-install-hero-ver">{{ selectedGameVer }}</span>
+              </div>
+              <p class="dl-install-hint">选择模组加载器；不选则安装纯净原版。点击整行进入版本选择。</p>
+
+              <div class="dl-loader-list">
+                <button v-for="loader in loaderOptions" :key="loader.id"
+                  class="dl-loader-row"
+                  :class="{ active: selectedLoader === loader.id, off: isLoaderDisabled(loader) || !isLoaderCompatible(loader) }"
+                  :disabled="isLoaderDisabled(loader) || !isLoaderCompatible(loader)"
+                  @click="openLoaderVersions(loader.id)">
+                  <span class="dl-loader-dot">{{ selectedLoader === loader.id ? '●' : '○' }}</span>
+                  <span class="dl-loader-info">
+                    <span class="dl-loader-name">
+                      {{ loader.zh }}
+                      <span v-if="getRecommendedLoader() === loader.id && isLoaderCompatible(loader)" class="dl-loader-badge">推荐</span>
+                    </span>
+                    <span class="dl-loader-desc">
+                      {{ isLoaderCompatible(loader) ? loader.desc : `不兼容 · ${getLoaderIncompatReason(loader)}` }}
+                    </span>
+                  </span>
+                  <span v-if="selectedLoader === loader.id && selectedLoaderVer" class="dl-loader-picked">{{ selectedLoaderVer }}</span>
+                  <span v-else-if="isLoaderCompatible(loader) && !isLoaderDisabled(loader)" class="dl-loader-arrow">›</span>
+                </button>
+              </div>
+            </div>
+
+            <aside class="dl-install-side">
+              <div class="dl-side-title">安装摘要<span>SUMMARY</span></div>
+
+              <label class="dl-side-field">
+                <span class="dl-side-label">实例名称</span>
+                <input class="form-input" v-model="installGameInstanceName"
+                  :placeholder="gameInstallName()" @keyup.enter="confirmInstall" />
+              </label>
+
+              <div class="dl-side-row"><span>游戏版本</span><b>{{ selectedGameVer }}</b></div>
+              <div class="dl-side-row"><span>加载器</span><b>{{ selectedLoader ? loaderLabel(selectedLoader) : '原版' }}</b></div>
+              <div class="dl-side-row"><span>加载器版本</span><b>{{ selectedLoaderVer || '—' }}</b></div>
+              <div class="dl-side-row"><span>实例目录</span><b class="dl-side-path">versions/{{ installGameInstanceName || gameInstallName() }}</b></div>
+
+              <div class="dl-side-actions">
+                <button class="acct-type-btn cancel" @click="cancelInstall">取消</button>
+                <button class="acct-type-btn confirm" @click="confirmInstall">确认安装</button>
+              </div>
+            </aside>
+          </div>
+        </template>
+      </div>
+      <!-- 安装整合包（整页流程） -->
+      <div v-else-if="active === 'modpack-install'" key="modpack-install" class="dl-install-view">
+        <div class="dl-install-grid">
+          <div class="dl-install-main">
+            <div class="dl-install-hero">
+              <span class="dl-install-hero-label">MODPACK</span>
+              <span class="dl-install-hero-ver">{{ projectDetail?.title || modpackInstanceName }}</span>
+            </div>
+
+            <div class="dl-modpack-file">
+              <span class="dl-modpack-file-icon">◫</span>
+              <span class="dl-modpack-file-name">{{ modpackFileName }}</span>
+              <span class="dl-modpack-file-size" v-if="modpackFileSize">
+                {{ (modpackFileSize / 1024 / 1024).toFixed(1) }} MB
+              </span>
+            </div>
+
+            <p class="dl-install-hint">
+              安装过程会自动完成下列步骤，进度可在「任务列表」查看；中途可在任务卡上取消。
+            </p>
+            <div class="dl-modpack-steps">
+              <div class="dl-modpack-step"><b>01</b><span>下载整合包</span></div>
+              <div class="dl-modpack-step"><b>02</b><span>解压 overrides</span></div>
+              <div class="dl-modpack-step"><b>03</b><span>按清单拉取模组</span></div>
+              <div class="dl-modpack-step"><b>04</b><span>安装对应加载器</span></div>
+            </div>
+
+            <div class="dl-modpack-about" v-if="projectDetail?.description">
+              <div class="dl-side-title">整合包简介<span>ABOUT</span></div>
+              <p>{{ projectDetail.description }}</p>
+            </div>
+          </div>
+
+          <aside class="dl-install-side">
+            <div class="dl-side-title">安装摘要<span>SUMMARY</span></div>
+
+            <label class="dl-side-field">
+              <span class="dl-side-label">实例名称</span>
+              <input class="form-input" v-model="modpackInstanceName" @input="checkConflict"
+                @keyup.enter="!modpackConflict && confirmModpackInstall()" />
+            </label>
+            <p v-if="modpackConflict" class="dl-side-error">该实例名已存在，请更换名称</p>
+
+            <div class="dl-side-row"><span>来源文件</span><b class="dl-side-path">{{ modpackFileName }}</b></div>
+            <div class="dl-side-row"><span>目标目录</span><b class="dl-side-path">versions/{{ modpackInstanceName.trim() || '…' }}</b></div>
+
+            <div class="dl-side-actions">
+              <button class="acct-type-btn cancel" @click="active = modpackReturnTo">取消</button>
+              <button class="acct-type-btn confirm"
+                :disabled="modpackConflict || !modpackInstanceName.trim()"
+                @click="confirmModpackInstall">开始安装</button>
+            </div>
+          </aside>
+        </div>
+      </div>
       <!-- 项目详情 -->
       <div v-else key="detail" class="dl-detail-view">
         <div v-if="!projectDetail" class="dl-results-empty">
@@ -572,97 +767,5 @@ function goBack() {
       </div>
     </Transition>
 
-    <!-- 整合包安装弹窗 -->
-    <Transition name="modal">
-      <div v-if="showModpackDialog" class="modal-overlay" @click.self="showModpackDialog = false">
-        <div class="modal-panel" style="width:400px">
-          <div class="modal-head">
-            <span class="modal-title">
-              <span class="bl-zh">安装整合包</span>
-              <span class="bl-en">INSTALL MODPACK</span>
-            </span>
-            <button class="modal-close" @click="showModpackDialog = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="form-field">
-              <span class="form-label">实例名称 / Instance Name</span>
-              <input class="form-input" v-model="modpackInstanceName" @input="checkConflict" @keyup.enter="!modpackConflict && confirmModpackInstall()" />
-              <span v-if="modpackConflict" style="color:var(--danger);font-size:10px;margin-top:4px">该实例名已存在，请更换名称</span>
-            </div>
-            <div class="modal-actions">
-              <button class="acct-type-btn cancel" @click="showModpackDialog = false">取消</button>
-              <button class="acct-type-btn confirm" :disabled="modpackConflict" @click="confirmModpackInstall">安装</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Transition>
-
-    <!-- 游戏版本安装弹窗 -->
-    <Transition name="modal">
-      <div v-if="showGameInstall" class="modal-overlay" @click.self="closeGameInstall()">
-        <div class="modal-panel" style="width:480px">
-          <div class="modal-head">
-            <span class="modal-title">
-              <span class="bl-zh">安装游戏</span>
-              <span class="bl-en">INSTALL GAME</span>
-            </span>
-            <button class="modal-close" @click="closeGameInstall()">✕</button>
-          </div>
-          <div class="modal-body" style="gap:8px;overflow-y:auto;max-height:60vh">
-            <!-- 加载器版本选择子页面 -->
-            <template v-if="showLoaderVersions">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                <button class="dl-back-btn" @click="backToLoaderSelect()">← 返回</button>
-                <span style="font-family:var(--font-mono);font-size:13px;color:var(--accent)">{{ gameInstallName() }}</span>
-              </div>
-              <div v-if="loaderVersionLoading" style="padding:20px;text-align:center;color:var(--text-dim)">加载中...</div>
-              <div v-else class="dl-game-ver-list" style="max-height:300px;overflow-y:auto">
-                <div v-for="v in loaderVersionList" :key="v.version" class="dl-game-ver-row"
-                  style="cursor:pointer" @click="confirmLoaderVersion(v.version)">
-                  <span class="dl-game-ver-id">{{ v.version }}</span>
-                  <span v-if="v.stable" style="color:var(--accent);font-size:10px;border:1px solid var(--accent);padding:1px 4px">推荐</span>
-                </div>
-                <div v-if="loaderVersionList.length === 0" style="padding:20px;text-align:center;color:var(--text-dim)">
-                  未找到适用于 {{ selectedGameVer }} 的版本
-                </div>
-              </div>
-            </template>
-            <!-- 加载器选择主页面 -->
-            <template v-else>
-            <div style="font-family:var(--font-mono);font-size:15px;color:var(--accent);text-align:center;word-break:break-all">
-              {{ gameInstallName() }}
-            </div>
-            <div class="form-field">
-              <span class="form-label">实例名称 / Instance Name</span>
-              <input class="form-input" v-model="installGameInstanceName" :placeholder="gameInstallName()" @keyup.enter="doInstallGame()" />
-            </div>
-            <div class="modal-desc-sub" style="text-align:center">选择模组加载器 · 实例名称将自动生成</div>
-            <div class="modal-types">
-              <div v-for="loader in loaderOptions" :key="loader.id"
-                :class="['acct-type-btn', { active: selectedLoader === loader.id }]"
-                :style="(isLoaderDisabled(loader) || !isLoaderCompatible(loader)) ? {opacity:.3,pointerEvents:'none'} : {}"
-                @click="openLoaderVersions(loader.id)">
-                <span class="atb-icon" style="font-size:16px">{{ selectedLoader === loader.id ? '●' : '○' }}</span>
-                <span class="atb-zh">{{ loader.zh }}
-                  <span v-if="getRecommendedLoader() === loader.id && isLoaderCompatible(loader)" style="font-size:11px;color:var(--accent);margin-left:6px;border:1px solid var(--accent);padding:1px 6px;border-radius:2px">推荐</span>
-                </span>
-                <span class="atb-en">
-                  {{ isLoaderCompatible(loader) ? loader.desc : `不兼容 (${getLoaderIncompatReason(loader)})` }}
-                </span>
-              </div>
-            </div>
-            <div class="modal-actions">
-              <button class="acct-type-btn cancel" @click="closeGameInstall()">取消</button>
-              <button class="acct-type-btn confirm" @click="doInstallGame()">
-                <span class="bl-zh">确认安装</span>
-                <span class="bl-en">CONFIRM</span>
-              </button>
-            </div>
-            </template>
-          </div>
-        </div>
-      </div>
-    </Transition>
   </section>
 </template>

@@ -141,6 +141,25 @@ pub(super) fn check_java_compatibility(
         ));
     }
 
+    // ── Java 8 时代的版本无法在 Java 9+ 上运行 ──
+    //
+    // 判据不看版本号而看依赖：这代版本要么用 launchwrapper（它把系统类加载器强转成
+    // URLClassLoader，Java 9 起必然 ClassCastException），要么用 LWJGL 2（本地库在
+    // Java 9+ 上加载失败）。不拦的话用户只会看到"点了没反应"，日志里躺一句
+    // `AppClassLoader cannot be cast to URLClassLoader`。
+    if actual >= 9 && required <= 8 && needs_java8_runtime(version) {
+        return Err(format!(
+            "该实例需要 Java 8，当前选中的是 Java {}，无法启动。\n\n\
+             原因：这代版本使用 launchwrapper / LWJGL 2，在 Java 9 及以上会直接崩溃\n\
+             （ClassCastException: AppClassLoader cannot be cast to URLClassLoader）。\n\n\
+             解决办法：安装一个 Java 8（Temurin 8 / Zulu 8 均可），\n\
+             再到「设置 → 启动 → Java 路径」里指定它的 javaw.exe。\n\n\
+             当前 Java: {}",
+            actual,
+            java_path.display()
+        ));
+    }
+
     if actual > required + 1 {
         log::warn!(
             "[launch] Java {} 明显高于该实例要求的 Java {}，LWJGL 等本地库可能不兼容；\
@@ -152,4 +171,24 @@ pub(super) fn check_java_compatibility(
     }
 
     Ok(())
+}
+
+/// 该版本是否依赖「Java 8 时代」的运行时（launchwrapper 或 LWJGL 2）
+fn needs_java8_runtime(version: &serde_json::Value) -> bool {
+    if let Some(main) = version["mainClass"].as_str() {
+        if main.contains("launchwrapper") {
+            return true;
+        }
+    }
+    version["libraries"]
+        .as_array()
+        .map(|libs| {
+            libs.iter().any(|l| {
+                let n = l["name"].as_str().unwrap_or("");
+                n.starts_with("net.minecraft:launchwrapper")
+                    || n.starts_with("org.lwjgl.lwjgl:")
+                    || n.starts_with("org.lwjgl:lwjgl:2.")
+            })
+        })
+        .unwrap_or(false)
 }

@@ -6,8 +6,9 @@
 //! - 进度通过 Tauri event "download-progress" 发射
 //! - 支持全局取消标志
 //!
-//! 进度事件格式:
+//! 进度事件格式（发射统一走 crate::progress，不要在别处直接 emit）:
 //! {
+//!   "kind": "file"|"stage", // file=逐文件进度, stage=阶段文案（见 progress.rs）
 //!   "batch_id": u64,        // 批量任务唯一 ID，用于前端聚合
 //!   "batch_total": u64,     // 批量任务总文件数
 //!   "batch_done": u64,      // 已完成文件数 (含跳过)
@@ -24,6 +25,7 @@
 use super::model::{DownloadFile, DownloadState};
 use crate::config::config_read;
 use crate::http::{build_http_client, is_cancelled};
+use crate::progress::next_batch_id;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -49,8 +51,9 @@ struct BatchProgress {
     done_files: AtomicU64,
     total_bytes: AtomicU64,
     downloaded_bytes: AtomicU64,
-    /// 各个活跃文件的当前速度 (B/s)，用于计算总速度
-    active_speeds: std::sync::Mutex<Vec<u64>>,
+    /// 活跃文件 → 当前速度 (B/s)。按文件名记账，文件完成即移除，
+    /// 这样总速度才是"此刻真正在传输的那些文件"之和。
+    active_speeds: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl BatchProgress {
@@ -60,16 +63,17 @@ impl BatchProgress {
         let total_dl = self.downloaded_bytes.load(Ordering::Relaxed);
         let total_all = self.total_bytes.load(Ordering::Relaxed);
 
-        // 更新活跃速度列表
-        {
+        // 维护"活跃文件速度表"：完成或停传的文件移出，其余更新为最新速度
+        let (total_speed, running) = {
             let mut speeds = self.active_speeds.lock().unwrap();
-            // 清理已完成文件的速度 (speed=0 表示文件已完成)
-            speeds.retain(|s| *s > 0);
-            if file_speed > 0 && !speeds.contains(&file_speed) {
-                // 用文件名哈希做简单去重
-                speeds.push(file_speed);
+            if file_percent >= 100 || file_speed == 0 {
+                speeds.remove(file_name);
+            } else {
+                speeds.insert(file_name.to_string(), file_speed);
             }
-        }
+            let sum: u64 = speeds.values().sum();
+            (sum, speeds.len())
+        };
 
         let aggregated_percent = if total_all > 0 {
             ((total_dl as f64 / total_all as f64) * 100.0).min(99.0) as u32
@@ -80,7 +84,8 @@ impl BatchProgress {
             0
         };
 
-        let _ = app.emit("download-progress", serde_json::json!({
+        let _ = app.emit(crate::progress::EVENT, serde_json::json!({
+            "kind": "file",
             "batch_id": self.batch_id,
             "batch_total": self.total_files,
             "batch_done": done,
@@ -92,15 +97,37 @@ impl BatchProgress {
             "total_bytes": total_all,
             "total_downloaded": total_dl,
             "aggregated_percent": aggregated_percent,
+            "total_speed": total_speed,
+            "batch_running": running,
             "step": step,
         }));
     }
 }
 
-static NEXT_BATCH_ID: AtomicU64 = AtomicU64::new(1);
+/// 连接长时间没有新数据 → 判定停滞并换源
+///
+/// 之前只有 600 秒总超时：一条 7 KB/s 但一直不断的连接会一直挂着，
+/// 用户看到的就是"进度卡在 7%、剩余时间 1 小时"。
+const STALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// 观察窗口：超过这个时长还低于阈值速度，就换源
+const SLOW_WINDOW: Duration = Duration::from_secs(15);
+/// 低于这个速度（B/s）视为"慢到不值得等"。定在 32 KB/s：
+/// 实测官方 Forge maven 在国内经常只有 9 KB/s，而 BMCLAPI 是 MB/s 级，
+/// 阈值太低就永远不换源（曾卡在 9 KB/s 不动）。
+const SLOW_MIN_BPS: u64 = 32 * 1024;
+/// 换源信号：调用方看到这些前缀就不再重试同一个 URL，直接试下一个源
+const ERR_STALL: &str = "__STALL__:";
+const ERR_SLOW: &str = "__SLOW__:";
+/// 限流信号：BMCLAPI 并发一多就回 429（有时是 403），要退避后重试同一个源，
+/// 当成永久失败会让整批文件同时失败。
+const ERR_THROTTLE: &str = "__THROTTLE__:";
 
-fn next_batch_id() -> u64 {
-    NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed)
+/// BMCLAPI 是社区镜像，并发打太高会被限流（实测 8 并发里 3 个直接 429/403）。
+/// 给它单独限流：同一时刻最多 3 个请求走镜像，官方源不受影响。
+static MIRROR_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
+fn is_mirror_url(url: &str) -> bool {
+    url.contains("bmclapi2.bangbang93.com")
 }
 
 /// 单文件下载 — 多源回退，3次重试
@@ -167,8 +194,9 @@ pub async fn download_file(
 
     let mut last_error = String::new();
 
-    for url in &urls {
+    for (url_idx, url) in urls.iter().enumerate() {
         log::debug!("[DL] 尝试: {} -> {}", url, file.local_path.display());
+        let allow_slow_abort = url_idx + 1 < urls.len();
 
         // 每个源最多重试 3 次 (参照 PCL-CE: 4次总共 = 1次初始 + 3次重试)
         for retry in 0u32..4 {
@@ -184,6 +212,7 @@ pub async fn download_file(
                 file.use_browser_ua,
                 file.custom_ua.as_deref(),
                 enable_parallel_chunks,
+                allow_slow_abort,
             )
             .await;
 
@@ -212,8 +241,23 @@ pub async fn download_file(
                     return Ok(());
                 }
                 Err(e) => {
-                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
+                    // 限流：等一会儿再来，别把整批文件一起判死
+                    if e.starts_with(ERR_THROTTLE) {
+                        // 指数退避：1s / 2s / 4s / 8s
+                        let wait = 1000u64 << retry.min(3);
+                        log::warn!("[DL] 被限流，退避 {} ms 后重试同一个源: {}", wait, e);
+                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                        last_error = e;
+                        continue;
+                    }
+                    // 停滞/过慢是"这个源不行"：换下一个源，但**不删**已下载的部分（续传用）
+                    if e.starts_with(ERR_STALL) || e.starts_with(ERR_SLOW) {
+                        log::warn!("[DL] 换源: {} ({})", url, e);
+                        last_error = e;
+                        break;
+                    }
                     cleanup_temp(&file.local_path).await;
+                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
                     last_error = e;
 
                     if retry < 3 {
@@ -238,39 +282,101 @@ async fn download_single(
     _use_browser_ua: bool,
     _custom_ua: Option<&str>,
     _enable_parallel_chunks: bool,
+    // 只剩最后一个源时不要再"过慢中断"，否则大文件会永远下不完
+    allow_slow_abort: bool,
 ) -> Result<u64, String> {
     let client = build_http_client(Duration::from_secs(600))?;
     let start = Instant::now();
 
-    let resp = client
-        .get(url)
-        .timeout(Duration::from_secs(600))
-        .send()
+    // 断点续传：上一轮（可能是换了源）留下的 .dlpart 已有多少字节就从哪继续，
+    // 这样"换源"不再意味着从头再下 5 MB。
+    let temp_path = local_path.with_extension("dlpart");
+    let resume_from = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+
+    // 走镜像时先排队，避免把社区镜像打成限流
+    let _mirror_permit = if is_mirror_url(url) {
+        Some(MIRROR_SEM.acquire().await.map_err(|e| format!("排队失败: {}", e))?)
+    } else {
+        None
+    };
+
+    let mut req = client.get(url).timeout(Duration::from_secs(600));
+    if resume_from > 0 {
+        req = req.header("Range", format!("bytes={}-", resume_from));
+    }
+    // 等响应头也要有超时：BMCLAPI 走 Cloudflare，实测会出现连接建立后
+    // 一个字都不回的情况（600 秒总超时意味着界面卡十分钟）。
+    let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
         .await
+        .map_err(|_| format!("{} 20 秒未收到响应头，换源", ERR_STALL))?
         .map_err(|e| format!("请求失败: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        let code = status.as_u16();
+        if code == 429 || code == 403 || code == 503 {
+            return Err(format!("{} HTTP {}", ERR_THROTTLE, status));
+        }
+        return Err(format!("HTTP {}", status));
     }
 
-    let total = resp.content_length().unwrap_or(0);
-    log::debug!("[DL] 响应: total={}, url={}", total, url);
+    // 206 = 服务器支持续传；200 = 不支持，只能从头来
+    let resumed = status.as_u16() == 206 && resume_from > 0;
+    let (mut downloaded, total, mut file) = if resumed {
+        let body_len = resp.content_length().unwrap_or(0);
+        let f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .map_err(|e| format!("无法打开临时文件: {}", e))?;
+        (resume_from, resume_from + body_len, f)
+    } else {
+        let f = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("无法创建临时文件: {}", e))?;
+        (0u64, resp.content_length().unwrap_or(0), f)
+    };
+    log::debug!("[DL] 响应: total={} resume_from={} url={}", total, resume_from, url);
 
     // 流式下载 + 进度追踪
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
-    let mut last_bytes: u64 = 0;
-
-    // 写入临时文件
-    let temp_path = local_path.with_extension("dlpart");
-    let mut file = std::fs::File::create(&temp_path)
-        .map_err(|e| format!("无法创建临时文件: {}", e))?;
+    let mut last_bytes: u64 = downloaded;
 
     use std::io::Write;
-    while let Some(chunk) = stream.next().await {
+    let mut slow_checked = false;
+    loop {
+        // 停滞检测：超过 STALL_TIMEOUT 没收到任何字节就判定这条连接废了，换源
+        let next = match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(v) => v,
+            Err(_) => {
+                // 保留 .dlpart：换源后要接着下
+                return Err(format!(
+                    "{} {} 秒无数据，换源",
+                    ERR_STALL,
+                    STALL_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|e| format!("读取失败: {}", e))?;
+
+        // 过慢检测：跑了 SLOW_WINDOW 还低于 SLOW_MIN_BPS，且离完成还远 → 换源
+        if allow_slow_abort && !slow_checked && start.elapsed() >= SLOW_WINDOW && total > 0 && downloaded < total * 95 / 100 {
+            slow_checked = true;
+            let secs = start.elapsed().as_secs().max(1);
+            // 只算**本轮**下载的字节：续传时 downloaded 里含着上次的进度，
+            // 直接除会把"续传了 2 MB 然后卡住"误判成高速。
+            let bps = downloaded.saturating_sub(resume_from) / secs;
+            if bps < SLOW_MIN_BPS {
+                // 保留 .dlpart：换源后接着下，不白费这几 MB
+                return Err(format!(
+                    "{} 平均 {} KB/s 过慢（已下载 {} KB），换源",
+                    ERR_SLOW,
+                    bps / 1024,
+                    downloaded / 1024
+                ));
+            }
+        }
 
         if is_cancelled() {
             let _ = std::fs::remove_file(&temp_path);
@@ -283,7 +389,7 @@ async fn download_single(
 
         // 每 100ms 发射一次进度 (参照 PCL-CE: 事件驱动)
         let elapsed = last_emit.elapsed();
-        if elapsed >= Duration::from_millis(100) || downloaded >= total {
+        if elapsed >= Duration::from_millis(50) || downloaded >= total {
             let speed = if elapsed.as_secs_f64() > 0.0 {
                 ((downloaded - last_bytes) as f64 / elapsed.as_secs_f64()) as u64
             } else {
@@ -301,8 +407,9 @@ async fn download_single(
                 .unwrap_or_default();
 
             let _ = app.emit(
-                "download-progress",
+                crate::progress::EVENT,
                 serde_json::json!({
+                    "kind": "file",
                     "batch_id": 0u64,
                     "batch_total": 1u64,
                     "batch_done": 0u64,
@@ -398,7 +505,7 @@ pub async fn download_files_parallel(
         done_files: AtomicU64::new(0),
         total_bytes: AtomicU64::new(total_bytes),
         downloaded_bytes: AtomicU64::new(0),
-        active_speeds: std::sync::Mutex::new(Vec::new()),
+        active_speeds: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let sem = Arc::new(tokio::sync::Semaphore::new(dl_threads));
@@ -439,6 +546,10 @@ pub async fn download_files_parallel(
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
+
+            // 先报一条 0%：并发文件马上出现在任务详情里，
+            // 而不是各自等第一个数据块（大文件首字节常要等几秒）
+            batch.emit(&a, &file_name, 0, 0, 0, file_size, "开始下载");
 
             // ── 跳过已存在且有效的文件 ──
             if can_use_exists && check.check(&local_path).is_none() {
@@ -536,7 +647,8 @@ async fn download_single_with_batch(
 
     let mut last_error = String::new();
 
-    for url in &urls {
+    for (url_idx, url) in urls.iter().enumerate() {
+        let allow_slow_abort = url_idx + 1 < urls.len();
         for retry in 0u32..4 {
             if is_cancelled() {
                 file.state = DownloadState::Interrupted;
@@ -544,7 +656,8 @@ async fn download_single_with_batch(
             }
 
             let result = download_single_with_batch_progress(
-                app, url, &file.local_path, batch, display_name, file.check.actual_size.max(0) as u64,
+                app, url, &file.local_path, batch, display_name,
+                file.check.actual_size.max(0) as u64, allow_slow_abort,
             ).await;
 
             match result {
@@ -564,8 +677,23 @@ async fn download_single_with_batch(
                     return Ok(size);
                 }
                 Err(e) => {
-                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
+                    // 限流：退避后重试同一个源
+                    if e.starts_with(ERR_THROTTLE) {
+                        // 指数退避：1s / 2s / 4s / 8s
+                        let wait = 1000u64 << retry.min(3);
+                        log::warn!("[DL] 被限流，退避 {} ms 后重试同一个源: {}", wait, e);
+                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                        last_error = e;
+                        continue;
+                    }
+                    // 停滞/过慢：换下一个源，保留已下载部分
+                    if e.starts_with(ERR_STALL) || e.starts_with(ERR_SLOW) {
+                        log::warn!("[DL] 换源: {} ({})", url, e);
+                        last_error = e;
+                        break;
+                    }
                     cleanup_temp(&file.local_path).await;
+                    log::warn!("[DL] 失败 (重试 {}/3): {}", retry, e);
                     last_error = e;
                     if retry < 3 {
                         let delay = 300 + retry as u64 * 300;
@@ -588,34 +716,97 @@ async fn download_single_with_batch_progress(
     batch: &BatchProgress,
     display_name: &str,
     file_total: u64,
+    allow_slow_abort: bool,
 ) -> Result<u64, String> {
     let client = build_http_client(Duration::from_secs(600))?;
 
-    let resp = client.get(url)
-        .timeout(Duration::from_secs(600))
-        .send().await
+    // 断点续传（同 download_single）：换源时接着下，不从头再来
+    let temp_path = local_path.with_extension("dlpart");
+    let resume_from = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+
+    // 走镜像时先排队，避免把社区镜像打成限流
+    let _mirror_permit = if is_mirror_url(url) {
+        Some(MIRROR_SEM.acquire().await.map_err(|e| format!("排队失败: {}", e))?)
+    } else {
+        None
+    };
+
+    let mut req = client.get(url).timeout(Duration::from_secs(600));
+    if resume_from > 0 {
+        req = req.header("Range", format!("bytes={}-", resume_from));
+    }
+    // 等响应头也要有超时：BMCLAPI 走 Cloudflare，实测会出现连接建立后
+    // 一个字都不回的情况（600 秒总超时意味着界面卡十分钟）。
+    let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
+        .await
+        .map_err(|_| format!("{} 20 秒未收到响应头，换源", ERR_STALL))?
         .map_err(|e| format!("请求失败: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        let code = status.as_u16();
+        if code == 429 || code == 403 || code == 503 {
+            return Err(format!("{} HTTP {}", ERR_THROTTLE, status));
+        }
+        return Err(format!("HTTP {}", status));
     }
 
-    let content_length = resp.content_length().unwrap_or(file_total);
-    log::debug!("[DL] 响应: total={}, url={}", content_length, url);
+    let resumed = status.as_u16() == 206 && resume_from > 0;
+    let (mut downloaded, total, mut file) = if resumed {
+        let body_len = resp.content_length().unwrap_or(0);
+        let f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .map_err(|e| format!("无法打开临时文件: {}", e))?;
+        (resume_from, resume_from + body_len, f)
+    } else {
+        let f = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("无法创建临时文件: {}", e))?;
+        (0u64, resp.content_length().unwrap_or(file_total), f)
+    };
+    log::debug!("[DL] 响应: total={} resume_from={} url={}", total, resume_from, url);
+    let start = Instant::now();
 
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
-    let mut last_bytes: u64 = 0;
-
-    let temp_path = local_path.with_extension("dlpart");
-    let mut file = std::fs::File::create(&temp_path)
-        .map_err(|e| format!("无法创建临时文件: {}", e))?;
+    let mut last_bytes: u64 = downloaded;
 
     use std::io::Write;
-    while let Some(chunk) = stream.next().await {
+    let mut slow_checked = false;
+    loop {
+        // 停滞检测：超过 STALL_TIMEOUT 没收到任何字节就判定这条连接废了，换源
+        let next = match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(v) => v,
+            Err(_) => {
+                // 保留 .dlpart：换源后要接着下
+                return Err(format!(
+                    "{} {} 秒无数据，换源",
+                    ERR_STALL,
+                    STALL_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|e| format!("读取失败: {}", e))?;
+
+        // 过慢检测：跑了 SLOW_WINDOW 还低于 SLOW_MIN_BPS，且离完成还远 → 换源
+        if allow_slow_abort && !slow_checked && start.elapsed() >= SLOW_WINDOW && total > 0 && downloaded < total * 95 / 100 {
+            slow_checked = true;
+            let secs = start.elapsed().as_secs().max(1);
+            // 只算**本轮**下载的字节：续传时 downloaded 里含着上次的进度，
+            // 直接除会把"续传了 2 MB 然后卡住"误判成高速。
+            let bps = downloaded.saturating_sub(resume_from) / secs;
+            if bps < SLOW_MIN_BPS {
+                // 保留 .dlpart：换源后接着下，不白费这几 MB
+                return Err(format!(
+                    "{} 平均 {} KB/s 过慢（已下载 {} KB），换源",
+                    ERR_SLOW,
+                    bps / 1024,
+                    downloaded / 1024
+                ));
+            }
+        }
 
         if is_cancelled() {
             let _ = std::fs::remove_file(&temp_path);
@@ -626,18 +817,18 @@ async fn download_single_with_batch_progress(
         downloaded += chunk.len() as u64;
 
         let elapsed = last_emit.elapsed();
-        if elapsed >= Duration::from_millis(100) || downloaded >= content_length {
+        if elapsed >= Duration::from_millis(50) || (total > 0 && downloaded >= total) {
             let speed = if elapsed.as_secs_f64() > 0.0 {
                 ((downloaded - last_bytes) as f64 / elapsed.as_secs_f64()) as u64
             } else { 0 };
 
-            let file_percent = if content_length > 0 {
-                ((downloaded as f64 / content_length as f64) * 100.0).min(99.0) as u32
+            let file_percent = if total > 0 {
+                ((downloaded as f64 / total as f64) * 100.0).min(99.0) as u32
             } else { 0 };
 
             // 发射批量进度事件
             batch.emit(app, display_name, file_percent, speed,
-                downloaded, content_length,
+                downloaded, total,
                 &format!("下载中 {}%", file_percent));
 
             last_emit = Instant::now();

@@ -30,10 +30,26 @@ interface AggregatedProgress {
   files: Record<string, FileProgress>;  // fileName → per-file progress
   batch_done: number;
   batch_total: number;
+  /** 当前真正在传输的文件数（后端 total_speed 的样本数） */
+  running: number;
+  /** 阶段文案（解压 / 安装加载器 …），仅 stage 事件会填 */
+  step: string;
 }
 const progressMap = ref<Record<number, AggregatedProgress>>({});
 
 const expandedTasks = ref<Set<number>>(new Set());
+/** 剩余时间估算：总量 - 已下载，除以当前总速度 */
+function etaText(a: AggregatedProgress | undefined): string {
+  if (!a || a.total_speed <= 0 || a.total_bytes <= 0) return "";
+  const remain = a.total_bytes - a.downloaded_bytes;
+  if (remain <= 0) return "";
+  const sec = remain / a.total_speed;
+  if (!isFinite(sec) || sec <= 0) return "";
+  if (sec < 60) return `剩余 ${Math.ceil(sec)} 秒`;
+  if (sec < 3600) return `剩余 ${Math.ceil(sec / 60)} 分钟`;
+  return `剩余 ${(sec / 3600).toFixed(1)} 小时`;
+}
+
 function toggleDetails(taskId: number) {
   const next = new Set(expandedTasks.value);
   if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
@@ -42,117 +58,145 @@ function toggleDetails(taskId: number) {
 
 let unlisten: UnlistenFn | null = null;
 
+/**
+ * 后端进度事件（schema 见 src-tauri/src/progress.rs）。
+ * 旧字段名 filename / percent 仅作兜底：以前 install/、modpack 等各自 emit
+ * 过一套格式，缺 file_name 时下面的字符串匹配会抛 TypeError，监听器直接断掉。
+ */
+interface ProgressPayload {
+  kind?: "stage" | "file";
+  batch_id?: number;
+  batch_total?: number;
+  batch_done?: number;
+  file_name?: string;
+  file_percent?: number;
+  file_speed?: number;
+  file_downloaded?: number;
+  file_total?: number;
+  total_bytes?: number;
+  total_downloaded?: number;
+  aggregated_percent?: number;
+  /** 后端算好的"活跃文件速度之和"，前端不再自己累加 */
+  total_speed?: number;
+  /** 当前并发下载的文件数 */
+  batch_running?: number;
+  step?: string;
+  /** @deprecated 旧 schema */
+  filename?: string;
+  /** @deprecated 旧 schema */
+  percent?: number;
+}
+
 onActivated(async () => {
   // ★ 激活时注册监听器
   if (unlisten) { unlisten(); unlisten = null; } // 安全清理
-  unlisten = await listen<{
-    batch_id: number;
-    batch_total: number;
-    batch_done: number;
-    file_name: string;
-    file_percent: number;
-    file_speed: number;
-    file_downloaded: number;
-    file_total: number;
-    total_bytes: number;
-    total_downloaded: number;
-    aggregated_percent: number;
-    step: string;
-  }>("download-progress", (event) => {
+  unlisten = await listen<ProgressPayload>("download-progress", (event) => {
     const p = event.payload;
+    const fileName = p.file_name ?? p.filename ?? "";
+    const batchTotal = p.batch_total ?? 0;
+    const batchDone = p.batch_done ?? 0;
+    const filePercent = p.file_percent ?? p.percent ?? 0;
+    const aggregated = p.aggregated_percent ?? p.percent ?? filePercent;
+    // 阶段事件只有一句文案和总百分比，没有文件粒度
+    const isStage = p.kind === "stage" || (p.kind === undefined && p.batch_total === undefined);
 
-    // ── 建立 batch_id → task 映射 ──
+    // ── 找到事件对应的任务卡：batch_id 优先，其次按名称，最后兜底最后一张卡 ──
     let task: DownloadTask | undefined;
-    if (p.batch_id > 0 && batchTaskMap.has(p.batch_id)) {
-      const tid = batchTaskMap.get(p.batch_id)!;
-      task = dlTasks.value.find(t => t.id === tid);
+    if (p.batch_id) {
+      const tid = batchTaskMap.get(p.batch_id);
+      if (tid !== undefined) task = dlTasks.value.find(t => t.id === tid);
     }
-    if (!task) {
-      // 按文件名匹配任务
-      task = dlTasks.value.find(t => t.name === p.file_name);
-      if (!task) task = dlTasks.value.find(t => p.file_name.includes(t.name));
-      if (!task) task = dlTasks.value.find(t => t.name.includes(p.file_name));
-      if (!task && dlTasks.value.length > 0) task = dlTasks.value[dlTasks.value.length - 1];
-      if (!task) return;
-
-      // 记录 mapping
-      if (p.batch_id > 0) {
-        batchTaskMap.set(p.batch_id, task.id);
-      }
+    if (!task && fileName) {
+      task = dlTasks.value.find(t => t.name === fileName)
+        ?? dlTasks.value.find(t => t.name.includes(fileName) || fileName.includes(t.name));
     }
+    if (!task && dlTasks.value.length > 0) task = dlTasks.value[dlTasks.value.length - 1];
+    if (!task) return;
+    if (p.batch_id) batchTaskMap.set(p.batch_id, task.id);
 
     // ── 更新聚合进度 ──
+    const batchId = p.batch_id ?? 0;
     let agg = progressMap.value[task.id];
-    if (!agg || agg.batch_id !== p.batch_id) {
+    if (!agg || agg.batch_id !== batchId) {
       // 新批次开始
       agg = {
-        batch_id: p.batch_id,
+        batch_id: batchId,
         percent: 0,
         total_speed: 0,
-        total_bytes: p.total_bytes,
-        downloaded_bytes: 0,
+        total_bytes: p.total_bytes ?? 0,
+        downloaded_bytes: p.total_downloaded ?? 0,
         files: {},
-        batch_done: 0,
-        batch_total: p.batch_total,
+        batch_done: batchDone,
+        batch_total: batchTotal,
+        running: 0,
+        step: "",
       };
     }
 
-    // 更新 per-file 进度
-    agg.batch_id = p.batch_id;
-    agg.batch_done = p.batch_done;
-    agg.batch_total = p.batch_total;
-    agg.total_bytes = p.total_bytes;
+    agg.batch_id = batchId;
+    agg.batch_done = batchDone;
+    agg.batch_total = batchTotal;
+    if (p.total_bytes) agg.total_bytes = p.total_bytes;
+    if (p.total_downloaded) agg.downloaded_bytes = p.total_downloaded;
+    // 阶段进度和文件进度交替上报，百分比只增不减，避免进度条倒退
+    agg.percent = Math.max(agg.percent, Math.min(aggregated, 100));
+    // 阶段文案只来自 stage 事件；文件事件的状态由下面的百分比描述表达
+    agg.step = isStage ? (p.step || "") : "";
 
-    // 用 aggregated_percent 作为进度条的进度（不会横跳）
-    agg.percent = p.aggregated_percent;
-
-    // 更新或插入 per-file 条目
-    agg.files[p.file_name] = {
-      file_name: p.file_name,
-      file_percent: p.file_percent,
-      file_speed: p.file_speed,
-      file_downloaded: p.file_downloaded,
-      file_total: p.file_total,
-    };
-
-    // ── 计算总速度：所有活跃文件速度之和 ──
-    let totalSpeed = 0;
-    for (const key of Object.keys(agg.files)) {
-      const f = agg.files[key];
-      if (f.file_speed > 0 && f.file_percent < 100) {
-        totalSpeed += f.file_speed;
-      }
+    // 阶段事件不是文件，不进 per-file 列表
+    if (!isStage && fileName) {
+      agg.files[fileName] = {
+        file_name: fileName,
+        file_percent: filePercent,
+        file_speed: p.file_speed ?? 0,
+        file_downloaded: p.file_downloaded ?? 0,
+        file_total: p.file_total ?? 0,
+      };
     }
-    agg.total_speed = totalSpeed;
+
+    // ── 计算总速度 ──
+    // 后端已经按"活跃文件"记账给出 total_speed；只有老事件（没有该字段）才回退到前端累加
+    if (typeof p.total_speed === "number") {
+      agg.total_speed = p.total_speed;
+    } else {
+      let totalSpeed = 0;
+      for (const key of Object.keys(agg.files)) {
+        const f = agg.files[key];
+        if (f.file_speed > 0 && f.file_percent < 100) totalSpeed += f.file_speed;
+      }
+      agg.total_speed = totalSpeed;
+    }
+    if (typeof p.batch_running === "number") agg.running = p.batch_running;
 
     progressMap.value = { ...progressMap.value, [task.id]: agg };
 
     // ── 更新任务状态显示 ──
-    if (!p.batch_total && !p.file_percent && p.step) {
-      // 自定义阶段描述（如整合包安装的"解压中..."，没有批量/文件进度时使用）
-      task.status = p.step;
-    } else if (p.batch_total > 1) {
-      task.status = `下载中 ${p.aggregated_percent || 0}% (${p.batch_done}/${p.batch_total})`;
-    } else if (p.file_percent < 100) {
-      task.status = `下载中 ${p.file_percent}% — ${p.file_name}`;
+    if (isStage) {
+      // 阶段文案（准备 / 解压 / 安装加载器 …）
+      task.status = p.step || `处理中 ${agg.percent}%`;
+    } else if (batchTotal > 1) {
+      task.status = `下载中 ${agg.percent}% (${batchDone}/${batchTotal})`;
+    } else if (filePercent < 100) {
+      task.status = `下载中 ${filePercent}% — ${fileName || task.name}`;
     } else {
-      task.status = `处理中 — ${p.file_name}`;
+      task.status = p.step || `处理中 — ${fileName || task.name}`;
     }
 
     // ── 更新步骤列表（详细面板用） ──
-    if (!task.steps) task.steps = [];
-    const stepText = p.batch_total > 1
-      ? `${p.file_name} ${p.file_percent}%`
-      : `下载中 ${p.file_percent}%`;
-    // 找到同名文件的旧步骤并替换
-    const existingIdx = task.steps.findIndex(s =>
-      s.startsWith(p.file_name.substring(0, Math.min(20, p.file_name.length)))
-    );
-    if (existingIdx >= 0) {
-      task.steps[existingIdx] = stepText;
-    } else {
-      task.steps.push(stepText);
-      if (task.steps.length > 50) task.steps.shift();
+    if (!isStage && fileName) {
+      if (!task.steps) task.steps = [];
+      const stepText = batchTotal > 1
+        ? `${fileName} ${filePercent}%`
+        : `下载中 ${filePercent}%`;
+      // 找到同名文件的旧步骤并替换
+      const key = fileName.substring(0, Math.min(20, fileName.length));
+      const existingIdx = task.steps.findIndex(s => s.startsWith(key));
+      if (existingIdx >= 0) {
+        task.steps[existingIdx] = stepText;
+      } else {
+        task.steps.push(stepText);
+        if (task.steps.length > 50) task.steps.shift();
+      }
     }
   });
 });
@@ -227,13 +271,20 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
                 <span class="dtc-size" v-if="progressMap[t.id].total_bytes > 0">
                   {{ fmtSize(progressMap[t.id].downloaded_bytes) }} / {{ fmtSize(progressMap[t.id].total_bytes) }}
                 </span>
+                <span class="dtc-eta" v-if="etaText(progressMap[t.id])">{{ etaText(progressMap[t.id]) }}</span>
                 <span class="dtc-count" v-if="progressMap[t.id].batch_total > 1">
                   {{ progressMap[t.id].batch_done }}/{{ progressMap[t.id].batch_total }} 文件
+                </span>
+                <span class="dtc-running" v-if="progressMap[t.id].running > 0">
+                  {{ progressMap[t.id].running }} 路并发
                 </span>
               </div>
             </div>
 
-            <!-- 状态文本 -->
+            <!-- 阶段文案（下载/解压/安装加载器 等没有文件粒度时的说明） -->
+            <div class="dtc-step-text" v-if="progressMap[t.id]?.step">{{ progressMap[t.id].step }}</div>
+
+            <!-- 还没有任何进度事件时的兜底状态文本 -->
             <div class="dtc-status" v-if="!progressMap[t.id]">{{ t.status }}</div>
 
             <!-- 详情开关 -->
@@ -244,7 +295,7 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
               :title="expandedTasks.has(t.id) ? '收起详情' : '展开详情'"
             >
               {{ expandedTasks.has(t.id) ? '▲ 收起详情' : '▼ 详细信息' }}
-              <span class="dtc-toggle-badge">{{ progressMap[t.id].files.size }}</span>
+              <span class="dtc-toggle-badge">{{ Object.keys(progressMap[t.id].files).length }}</span>
             </button>
 
             <!-- ══════════ 详细信息面板 ══════════ -->
@@ -267,7 +318,7 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
                       {{ fmtSpeed(fp.file_speed) }}
                     </span>
                     <span class="dtc-file-size" v-if="fp.file_total > 0">
-                      {{ fmtSize(fp.file_total) }}
+                      {{ fmtSize(fp.file_downloaded) }} / {{ fmtSize(fp.file_total) }}
                     </span>
                   </div>
                 </div>
