@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const emit = defineEmits<{ navigate: [page: string] }>();
 import { inject, ref, type Ref, onActivated, onDeactivated } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -345,9 +346,12 @@ function fileEntries(files: Record<string, FileProgress> | undefined): [string, 
       </div>
     </div>
 
-    <div v-if="dlTasks.length === 0 && dlHistory.length === 0" class="dl-results-empty">
-      <span class="bl-zh">暂无任务</span>
-      <span class="bl-en">No tasks</span>
+    <div v-if="dlTasks.length === 0 && dlHistory.length === 0" class="empty-state">
+      <span class="empty-icon">◫</span>
+      <span class="empty-title">还没有下载任务</span>
+      <span class="empty-en">NO TASKS</span>
+      <span class="empty-hint">安装游戏、整合包或模组时，进度和速度会显示在这里。</span>
+      <button class="empty-cta" @click="emit('navigate', 'downloads')">去获取内容</button>
     </div>
   </section>
 </template>

@@ -85,9 +85,12 @@ async function removeAccount(index: number) {
       </button>
     </div>
 
-    <div v-if="accounts.length === 0 && !showDialog" class="acct-empty">
-      <p class="acct-empty-zh">暂无账户，请点击右上角「+ 新建账户」添加</p>
-      <p class="acct-empty-en">No accounts. Click [+ NEW ACCOUNT] to add one.</p>
+    <div v-if="accounts.length === 0 && !showDialog" class="empty-state">
+      <span class="empty-icon">◉</span>
+      <span class="empty-title">还没有添加账户</span>
+      <span class="empty-en">NO ACCOUNTS</span>
+      <span class="empty-hint">离线账户只在本机使用，不起服务器验证；正版账户需要 Microsoft 登录（暂未开放）。</span>
+      <button class="empty-cta" @click="showDialog = true">＋ 新建账户</button>
     </div>
 
     <TransitionGroup name="acct-list" tag="div" class="account-cards" v-else>

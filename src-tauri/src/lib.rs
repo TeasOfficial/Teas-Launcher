@@ -34,7 +34,7 @@ mod modrinth;
 mod curseforge;
 mod modpack;
 
-pub(crate) const BUILD: u32 = 92;
+pub(crate) const BUILD: u32 = 100;
 
 /// 构建日志插件 — 写入 .teas/launcher.log，dev 下同时输出到控制台
 ///
@@ -67,11 +67,26 @@ fn is_dir_writable(dir: &std::path::Path) -> bool {
 fn build_logger<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     let teas = config::teas_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let level = if cfg!(dev) {
+    // 日志级别：用户设置优先（设置 → 高级 → 日志级别），没设过就按构建类型给默认值。
+    // 这个值在启动时读取一次，改完需要重启才生效（UI 上有提示）。
+    let default_level = if cfg!(dev) {
         log::LevelFilter::Debug
     } else {
         log::LevelFilter::Info
     };
+
+    let level = config::config_read("user".to_string())
+        .ok()
+        .and_then(|c| c.get("log_level").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|s| match s.trim().to_uppercase().as_str() {
+            "TRACE" => Some(log::LevelFilter::Trace),
+            "DEBUG" => Some(log::LevelFilter::Debug),
+            "INFO" => Some(log::LevelFilter::Info),
+            "WARN" | "WARNING" => Some(log::LevelFilter::Warn),
+            "ERROR" => Some(log::LevelFilter::Error),
+            _ => None,
+        })
+        .unwrap_or(default_level);
 
     let mut builder = tauri_plugin_log::Builder::new()
         // Builder::new() 自带 Stdout + LogDir 两个默认 target，不清掉的话：

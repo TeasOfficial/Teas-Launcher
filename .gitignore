@@ -128,3 +128,6 @@ logs/
 
 # 工具临时目录
 /.dsh-tmp/
+
+# 提交信息临时文件（不要进仓库）
+.git-commit-msg.txt

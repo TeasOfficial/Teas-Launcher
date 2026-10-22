@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { readUserConfig, writeUserConfig } from "../utils/config";
 
@@ -40,6 +40,13 @@ const memSliderStep = 256; // 256 MB 步长
 const memSliderVal = ref(4096); // 当前值 MB
 const memAuto = ref(true); // 默认开启自动分配
 const autoMemValue = ref("");
+/** 推荐值的数值形式（MB）——用来在滑块轨道上画刻度，不再靠一行文字表达 */
+const autoMemMB = ref(0);
+
+const memSpan = computed(() => Math.max(1, memSliderMax.value - memSliderMin));
+const pctOf = (mb: number) => Math.max(0, Math.min(100, ((mb - memSliderMin) / memSpan.value) * 100));
+/** 推荐值在轨道上的位置 */
+const recPercent = computed(() => (autoMemMB.value ? pctOf(autoMemMB.value) : 0));
 
 function parseMemMB(s: string): number {
   const m = s.match(/(\d+)/);
@@ -67,6 +74,7 @@ async function toggleAutoMem() {
     // 已在自动模式 → 关闭
     memAuto.value = false;
     autoMemValue.value = "";
+    autoMemMB.value = 0;
     save("mem_auto", false);
     return;
   }
@@ -85,7 +93,8 @@ async function toggleAutoMem() {
     });
     memAuto.value = true;
     memSliderVal.value = autoMB;
-    autoMemValue.value = `推荐 ${autoMB} MB (≈${(autoMB/1024).toFixed(1)} GB)`;
+    autoMemMB.value = autoMB;
+    autoMemValue.value = `推荐 ${autoMB} MB`;
     cfg.value.max_memory = `${autoMB} MB`;
     save("mem_auto", true);
     save("max_memory", `${autoMB} MB`);
@@ -95,6 +104,14 @@ async function toggleAutoMem() {
 const generalSettings = [
   { key: "close_after",   labelZh: "启动后关闭启动器", labelEn: "Close After Launch", def: "否", toggle: true },
 ];
+
+/** 列表密度（P2-8）：紧凑 / 舒适，改完立刻生效，不需要重启 */
+const listDensity = ref<"comfort" | "compact">("comfort");
+function setDensity(d: "comfort" | "compact") {
+  listDensity.value = d;
+  document.documentElement.dataset.density = d;
+  save("list_density", d);
+}
 
 interface JavaEntry { path: string; version: string; }
 
@@ -142,6 +159,9 @@ onMounted(async () => {
   } catch (e) {
     console.error("[config] load failed:", e);
   }
+  listDensity.value = (cfg.value.list_density === "compact") ? "compact" : "comfort";
+  document.documentElement.dataset.density = listDensity.value;
+
   const w = cfg.value.window_width || "854";
   const h = cfg.value.window_height || "480";
   const match = windowPresets.find(p => p.w === w && p.h === h);
@@ -183,6 +203,11 @@ function saveDlThreads(v: string) {
   const n = Math.max(1, Math.min(64, parseInt(v) || 8));
   dlThreads.value = String(n);
   save("dl_threads", String(n));
+}
+
+/** 线程数是 1..64 的单个整数，用步进器比给一个大输入框合适 */
+function bumpDlThreads(delta: number) {
+  saveDlThreads(String((parseInt(dlThreads.value) || 8) + delta));
 }
 
 // ═══════════════════════════ 代理设置
@@ -235,10 +260,46 @@ async function detectProxy() {
   setTimeout(() => { proxyStatus.value = ""; }, 4000);
 }
 
-const advancedSettings = [
-  { key: "version_isolation",   labelZh: "版本隔离", labelEn: "Isolation",     def: "是" },
-  { key: "log_level",           labelZh: "日志级别", labelEn: "Log Level",     def: "INFO" },
+/**
+ * 高级设置的描述表。**必须声明控件类型** —— 以前这里只有 label 和 def，
+ * 模板一律兜底成 <input>，于是"版本隔离(是/否)"和"日志级别(枚举)"都成了自由文本框：
+ * 用户能打进去任意字符串，而后端 `s != "否"` 的判据会把拼错的输入静默当成"是"。
+ */
+interface AdvSetting {
+  key: string;
+  labelZh: string;
+  labelEn: string;
+  def: string;
+  type: "toggle" | "select";
+  options?: string[];
+  /** 改完要重启才生效的项，行尾给个提示 */
+  needsRestart?: boolean;
+}
+
+const advancedSettings: AdvSetting[] = [
+  { key: "version_isolation", labelZh: "版本隔离", labelEn: "Isolation", def: "是", type: "toggle" },
+  {
+    key: "log_level", labelZh: "日志级别", labelEn: "Log Level", def: "INFO",
+    type: "select",
+    options: ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"],
+    needsRestart: true,
+  },
 ];
+
+/** 下拉失焦后延迟关闭，给 click 留时间（直接关会点不中选项） */
+let advCloseTimer: number | undefined;
+function closeAdvSoon() {
+  window.clearTimeout(advCloseTimer);
+  advCloseTimer = window.setTimeout(() => { advOpenKey.value = ""; }, 120);
+}
+
+/** 哪一行的下拉是展开的（同时只允许一个） */
+const advOpenKey = ref("");
+function pickAdv(s: AdvSetting, val: string) {
+  cfg.value[s.key] = val;
+  save(s.key, val);
+  advOpenKey.value = "";
+}
 
 // ── JAR 扫描策略 ──
 const scanStrategy = ref("B");
@@ -334,11 +395,25 @@ function onCustomWH(which: string, e: any) {
             </div>
             <Transition name="drop">
               <div class="set-custom-wh" v-if="windowPreset === '自定义'">
-              <input class="set-input" style="width:70px;text-align:center" :value="getVal('window_width','854')" placeholder="854" @change="(e: any) => onCustomWH('window_width', e)" />
+              <input class="set-input is-num-sm" :value="getVal('window_width','854')" placeholder="854" @change="(e: any) => onCustomWH('window_width', e)" />
               <span style="color:var(--text-dim);margin:0 8px">×</span>
-              <input class="set-input" style="width:70px;text-align:center" :value="getVal('window_height','480')" placeholder="480" @change="(e: any) => onCustomWH('window_height', e)" />
+              <input class="set-input is-num-sm" :value="getVal('window_height','480')" placeholder="480" @change="(e: any) => onCustomWH('window_height', e)" />
             </div>
             </Transition>
+          </div>
+        </div>
+
+        <!-- 列表密度（P2-8） -->
+        <div class="set-item">
+          <span class="set-label">
+            <span class="bl-zh">列表密度</span>
+            <span class="bl-en">List Density</span>
+          </span>
+          <div class="toggle-group">
+            <button :class="['toggle-btn', { active: listDensity === 'compact' }]"
+                    @click="setDensity('compact')">紧凑</button>
+            <button :class="['toggle-btn', { active: listDensity === 'comfort' }]"
+                    @click="setDensity('comfort')">舒适</button>
           </div>
         </div>
 
@@ -362,21 +437,33 @@ function onCustomWH(which: string, e: any) {
         <div class="set-item">
           <span class="set-label"><span class="bl-zh">游戏内存</span><span class="bl-en">Memory</span></span>
           <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-            <!-- 滑块 + 输入框 + 单位 -->
-            <div style="display:flex;align-items:center;gap:8px">
-              <input type="range" class="mem-slider"
-                :min="memSliderMin" :max="memSliderMax" :step="memSliderStep"
-                :value="memSliderVal" :disabled="memAuto"
-                @input="onMemSlider($event)" />
-              <input class="set-input" style="width:68px;text-align:center;font-size:12px"
-                :value="memSliderVal" :disabled="memAuto"
+            <!-- 滑块（永远可交互，自动模式下拖动即切手动）+ 当前值刻度 + 推荐值刻度 -->
+            <div class="mem-row">
+              <div class="mem-track-wrap">
+                <div class="mem-track-rail">
+
+                  <span v-if="autoMemMB" class="mem-mark mem-mark-rec" :style="{ left: recPercent + '%' }"
+                        :title="`推荐 ${autoMemMB} MB`"></span>
+                </div>
+                <input type="range" class="mem-slider" :class="{ 'is-auto': memAuto }"
+                  :min="memSliderMin" :max="memSliderMax" :step="memSliderStep"
+                  :value="memSliderVal"
+                  @input="onMemSlider($event)" />
+              </div>
+              <input class="set-input is-num-sm mem-num"
+                :value="memSliderVal"
                 @change="onMemInput($event)" />
-              <span style="font-size:11px;color:var(--text-dim)">MB</span>
+              <span class="mem-unit">MB</span>
             </div>
-            <!-- 底部：刻度 + 自动开关 -->
-            <div style="display:flex;align-items:center;font-size:10px;color:var(--text-dim)">
-              <span style="width:40px">{{ memSliderMin / 1024 }} GB</span>
-              <span style="flex:1;text-align:center;color:var(--accent)">{{ memAuto && autoMemValue ? autoMemValue : '' }}</span>
+            <!-- 图例：起点 / 推荐值刻度 / 自动开关 / 上限 -->
+            <div class="mem-legend">
+              <span class="mem-end">{{ (memSliderMin / 1024).toFixed(1) }} GB</span>
+              <span class="mem-legend-mid">
+                <span v-if="autoMemMB" class="mem-tick-hint">
+                  <i class="mem-tick-swatch"></i>推荐 {{ autoMemMB }} MB
+                </span>
+                <span v-else-if="memAuto" class="mem-tick-hint mem-tick-hint--empty">计算推荐值…</span>
+              </span>
               <!-- HMCL-style 自动分配开关 -->
               <label @click="toggleAutoMem" class="mem-auto-btn" :class="{ on: memAuto }">
                 <span class="mem-auto-track">
@@ -384,7 +471,7 @@ function onCustomWH(which: string, e: any) {
                 </span>
                 <span class="mem-auto-label">{{ memAuto ? '自动' : '手动' }}</span>
               </label>
-              <span style="width:80px;text-align:right">最大 {{ (memSliderMax / 1024).toFixed(1) }} GB</span>
+              <span class="mem-end mem-end--right">最大 {{ (memSliderMax / 1024).toFixed(1) }} GB</span>
             </div>
           </div>
         </div>
@@ -396,7 +483,7 @@ function onCustomWH(which: string, e: any) {
             <span class="bl-en">Java Path</span>
           </span>
           <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-            <div class="custom-select" @click="javaOpen = !javaOpen" @blur="closeJavaSoon">
+            <div class="custom-select is-wide" @click="javaOpen = !javaOpen" @blur="closeJavaSoon">
               <span class="set-select-val" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ javaVal }}</span>
               <span class="set-select-arrow" :class="{ open: javaOpen }">▾</span>
               <Transition name="drop">
@@ -420,7 +507,7 @@ function onCustomWH(which: string, e: any) {
 
         <div class="set-item">
           <span class="set-label"><span class="bl-zh">JVM 参数</span><span class="bl-en">JVM Args</span></span>
-          <input class="set-input" :value="getVal('jvm_args','-XX:+UseG1GC')" @change="(e: any) => { cfg.jvm_args = e.target.value; save('jvm_args', e.target.value);; }" />
+          <input class="set-input is-wide" :value="getVal('jvm_args','-XX:+UseG1GC')" @change="(e: any) => { cfg.jvm_args = e.target.value; save('jvm_args', e.target.value);; }" />
         </div>
       </div>
 
@@ -440,9 +527,9 @@ function onCustomWH(which: string, e: any) {
           <div class="set-item">
             <span class="set-label"><span class="bl-zh">代理地址</span><span class="bl-en">Host</span></span>
             <div style="display:flex;gap:8px;flex:1">
-              <input class="set-input" style="flex:1" :value="proxyHost" placeholder="127.0.0.1" @change="(e: any) => { proxyHost = e.target.value; saveProxyField('proxy_host', e.target.value); }" />
+              <input class="set-input" :value="proxyHost" placeholder="127.0.0.1" @change="(e: any) => { proxyHost = e.target.value; saveProxyField('proxy_host', e.target.value); }" />
               <span style="color:var(--text-dim);display:flex;align-items:center">:</span>
-              <input class="set-input" style="width:80px;text-align:center" :value="proxyPort" placeholder="8080" @change="(e: any) => { proxyPort = e.target.value; saveProxyField('proxy_port', e.target.value); }" />
+              <input class="set-input is-num" :value="proxyPort" placeholder="8080" @change="(e: any) => { proxyPort = e.target.value; saveProxyField('proxy_port', e.target.value); }" />
             </div>
           </div>
 
@@ -499,7 +586,13 @@ function onCustomWH(which: string, e: any) {
         <!-- 下载线程数 -->
         <div class="set-item">
           <span class="set-label"><span class="bl-zh">下载线程数</span><span class="bl-en">Threads</span></span>
-          <input class="set-input" style="width:80px;text-align:center" :value="dlThreads" @change="(e: any) => saveDlThreads(e.target.value)" placeholder="8" />
+          <div class="num-stepper">
+            <button class="ns-btn" :disabled="parseInt(dlThreads) <= 1" @click="bumpDlThreads(-1)" title="减 1">−</button>
+            <input class="ns-input" :value="dlThreads" @change="(e: any) => saveDlThreads(e.target.value)"
+                   inputmode="numeric" placeholder="8" />
+            <button class="ns-btn" :disabled="parseInt(dlThreads) >= 64" @click="bumpDlThreads(1)" title="加 1">+</button>
+            <span class="ns-unit">线程</span>
+          </div>
         </div>
 
         <!-- JAR 扫描策略 -->
@@ -519,12 +612,37 @@ function onCustomWH(which: string, e: any) {
           </div>
         </div>
 
-        <div class="set-item" v-for="s in advancedSettings" :key="s.key">
+        <div class="set-item" v-for="(s, advIdx) in advancedSettings" :key="s.key">
           <span class="set-label">
             <span class="bl-zh">{{ s.labelZh }}</span>
             <span class="bl-en">{{ s.labelEn }}</span>
           </span>
-          <input class="set-input" :value="getVal(s.key, s.def)" @change="(e: any) => { cfg[s.key] = e.target.value; save(s.key, e.target.value); }" />
+
+          <!-- 是 / 否 -->
+          <div v-if="s.type === 'toggle'" class="toggle-group">
+            <button :class="['toggle-btn', { active: getVal(s.key, s.def) === '是' }]"
+                    @click="cfg[s.key] = '是'; save(s.key, '是')">是</button>
+            <button :class="['toggle-btn', { active: getVal(s.key, s.def) === '否' }]"
+                    @click="cfg[s.key] = '否'; save(s.key, '否')">否</button>
+          </div>
+
+          <!-- 枚举 -->
+          <div v-else-if="s.type === 'select'" style="display:flex;align-items:center;gap:10px">
+            <div class="custom-select" @click="advOpenKey = advOpenKey === s.key ? '' : s.key"
+                 @blur="closeAdvSoon">
+              <span class="set-select-val">{{ getVal(s.key, s.def) }}</span>
+              <span class="set-select-arrow" :class="{ open: advOpenKey === s.key }">▾</span>
+              <Transition name="drop">
+                <div class="set-select-options" :class="{ 'open-up': advIdx >= advancedSettings.length - 2 }" v-if="advOpenKey === s.key">
+                  <div class="set-select-opt"
+                       :class="{ active: opt === getVal(s.key, s.def) }"
+                       v-for="opt in s.options" :key="opt"
+                       @click.stop="pickAdv(s, opt)">{{ opt }}</div>
+                </div>
+              </Transition>
+            </div>
+            <span v-if="s.needsRestart" class="set-restart-hint">重启生效</span>
+          </div>
         </div>
       </div>
 
@@ -672,5 +790,6 @@ function onCustomWH(which: string, e: any) {
         </div>
       </div>
     </Transition>
+
   </section>
 </template>

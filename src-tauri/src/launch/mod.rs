@@ -188,10 +188,14 @@ impl LaunchContext {
         };
 
         // 版本隔离（默认开启）
+        // 判据要宽容：以前只认 "否"，写成 "no" / "false" / "否 "（带空格）都会被静默当成"开启"。
         let version_isolation = cfg
             .get("version_isolation")
             .and_then(|v| v.as_str())
-            .map(|s| s != "否")
+            .map(|s| {
+                let t = s.trim().to_lowercase();
+                !matches!(t.as_str(), "否" | "no" | "false" | "0" | "off" | "关闭")
+            })
             .unwrap_or(true);
 
         LaunchContext {

@@ -59,17 +59,32 @@ A modern Minecraft launcher built with **Tauri v2 + Vue 3 + Rust**, featuring an
 
 ## CurseForge API Key
 
-CurseForge 的官方 API 需要 Key，**本项目不内置任何 Key**：
+CurseForge 的官方 API 需要 Key。本项目的处理方式：
 
-1. 在本机写入（不会回显、不进 shell 历史）：
+| 场景 | Key 从哪来 |
+|------|-----------|
+| **发布版（Release 构建）** | **打包时内置**，开箱即用，用户无需自行申请 |
+| **源码 / 开发版** | **不内置**，需自行提供（见下） |
+
+> [!IMPORTANT]
+> **仓库与源码中永远不含明文 Key。** 内置只发生在打包环节（构建时注入），
+> 不会提交进 git，也不会出现在日志、错误信息或前端返回值里。
+> 自带 Key 的构建产物请勿对外分发 —— 二进制里的 Key 是可以被提取的。
+
+### 源码 / 开发版如何提供 Key
+
+按以下优先级读取：
+
+1. 环境变量 `TEAS_CURSEFORGE_API_KEY`
+2. `%APPDATA%\TeasLauncher\curseforge.key` —— 用仓库脚本写入，不回显、不进 shell 历史：
+
    ```powershell
    ./scripts/set-cf-key.ps1
    ```
-   也可以用环境变量 `TEAS_CURSEFORGE_API_KEY` 覆盖。
-2. 加密位置：`%APPDATA%\TeasLauncher\curseforge.key`（写入后去掉继承，仅当前用户可读）。
-3. 没有 Key 时 **CurseForge 功能直接返回可操作的错误提示**，而不是静默失败或走不可靠的镜像。
 
-前端只能拿到 `{configured, source, file}` 这样的状态，**Key 本身永远不会回传或写进日志**。
+没有 Key 时，CurseForge 功能会**直接返回可操作的错误提示**，而不是静默失败或走不可靠的第三方镜像。
+
+无论哪种方式，前端只能拿到 `{configured, source, file}` 这样的状态，**Key 本身永远不会回传**。
 
 ## 旧版本资源（pre-1.6）
 

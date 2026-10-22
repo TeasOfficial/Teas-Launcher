@@ -57,9 +57,21 @@ const searchType = ref("");
 const modSource = ref("Modrinth"); // Modrinth 或 CurseForge
 
 const categories = [
-  { id: "game" as Section, zh: "原版游戏", en: "VANILLA", icon: "▣" },
-  { id: "modpack" as Section, zh: "整合包", en: "MODPACKS", icon: "◫", bbsmcType: "modpack" },
-  { id: "resource" as Section, zh: "模组资源", en: "MODS & MORE", icon: "⬡" },
+  {
+    id: "game" as Section, zh: "原版游戏", en: "VANILLA", icon: "▣",
+    desc: "安装 Mojang 官方发布的 Minecraft 版本，可搭配 Forge / Fabric / NeoForge / Quilt 等加载器。",
+    meta: ["版本覆盖 1.0 → 最新快照", "5 种加载器：Forge / NeoForge / Fabric / Quilt / Cleanroom", "可指定实例名与下载源"],
+  },
+  {
+    id: "modpack" as Section, zh: "整合包", en: "MODPACKS", icon: "◫", bbsmcType: "modpack",
+    desc: "从 Modrinth / CurseForge 一键安装整合包，自带配置与资源，装完即可启动。",
+    meta: ["支持 .mrpack 与 CurseForge 整合包", "自动安装对应加载器与依赖", "overrides 自动覆盖到实例"],
+  },
+  {
+    id: "resource" as Section, zh: "模组资源", en: "MODS & MORE", icon: "⬡",
+    desc: "搜索 Mod、资源包、光影与数据包，直接安装到指定实例。",
+    meta: ["Mod / 资源包 / 光影 / 数据包", "自动匹配实例的游戏版本", "支持拖入本地文件安装"],
+  },
 ];
 
 // ── 下载任务管理（页面内所有安装流程共用）──
@@ -456,6 +468,9 @@ function loaderLabel(id: string) {
           <span class="dl-main-icon">{{ cat.icon }}</span>
           <span class="dl-main-zh">{{ cat.zh }}</span>
           <span class="dl-main-en">{{ cat.en }}</span>
+          <span class="dl-main-desc">{{ cat.desc }}</span>
+          <ul class="dl-main-meta"><li v-for="m in cat.meta" :key="m">{{ m }}</li></ul>
+          <span class="dl-main-go">进入 <span aria-hidden="true">›</span></span>
         </div>
       </div>
 
@@ -547,6 +562,7 @@ function loaderLabel(id: string) {
                 <span v-if="getMCVersion() && currentBbsmcType !== 'modpack'" :class="'dl-compat-badge ' + compatBadge(r.versions).cls">{{ compatBadge(r.versions).text }}</span>
               </div>
             </div>
+            <span class="dl-result-go" aria-hidden="true">›</span>
           </div>
           <!-- 分页 -->
           <div class="dl-pagination" v-if="searchTotal > searchLimit">

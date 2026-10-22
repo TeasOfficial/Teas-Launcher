@@ -383,12 +383,12 @@ function logSaved(name: string) {
         </div>
       </template>
 
-      <div v-if="totalCount === 0" class="inst-empty">
-        <span class="ie-zh">{{ searchText.trim() ? '没有匹配的实例' : '还没有任何实例' }}</span>
-        <span class="ie-en">{{ searchText.trim() ? 'NO MATCH' : 'NO INSTANCES' }}</span>
-        <button v-if="!searchText.trim()" class="acct-new-btn" @click="emit('navigate', 'downloads')">
-          前往获取内容
-        </button>
+      <div v-if="totalCount === 0" class="empty-state">
+        <span class="empty-icon">▤</span>
+        <span class="empty-title">{{ searchText.trim() ? '没有匹配的实例' : '还没有任何实例' }}</span>
+        <span class="empty-en">{{ searchText.trim() ? 'NO MATCH' : 'NO INSTANCES' }}</span>
+        <span class="empty-hint" v-if="!searchText.trim()">实例即一个独立的游戏版本与模组组合。先安装一份原版或整合包，这里就会出现条目。</span>
+        <button v-if="!searchText.trim()" class="empty-cta" @click="emit('navigate', 'downloads')">前往获取内容</button>
       </div>
     </div>
 

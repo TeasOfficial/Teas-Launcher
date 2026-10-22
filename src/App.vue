@@ -171,7 +171,20 @@ const onDragOverHandler = (e: DragEvent) => {
 };
 const onDragLeaveHandler = () => { dragOver.value = false; };
 
+/** 列表密度（P2-8）：紧凑 / 舒适 —— 挂在 <html data-density> 上，CSS 用变量切换行高 */
+async function applyDensity() {
+  try {
+    const cfg = await readUserConfig();
+    const d = String(cfg.list_density || "comfort");
+    document.documentElement.dataset.density = d === "compact" ? "compact" : "comfort";
+  } catch {
+    document.documentElement.dataset.density = "comfort";
+  }
+}
+
 onMounted(async () => {
+  void applyDensity();
+
   // 监听 Tauri v2 拖放事件
   // Tauri v2 的拖放事件挂在 webview 上（Window.onDragDropEvent 已废弃）。
   // 注意：dragDropEnabled=true 时原生接管，HTML5 的 dragover 不会触发；
